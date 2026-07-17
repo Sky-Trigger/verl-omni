@@ -56,7 +56,7 @@ class QwenImageMixGRPOPipelineWithLogProb(QwenImagePipelineWithLogProb):
         state: DiffusionRequestState,
         **kwargs: Any,
     ) -> DiffusionRequestState:
-        """Override to fix the SDE window before the stepwise prepare_encode draws it.
+        """Fix the SDE window before step-execution ``prepare_encode`` draws it.
 
         In step-execution mode ``forward()`` is never called, so
         ``_maybe_make_progressive_window`` would never run.  Calling it here,
