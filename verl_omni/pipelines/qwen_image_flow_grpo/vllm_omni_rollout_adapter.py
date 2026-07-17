@@ -14,6 +14,7 @@
 
 import copy
 import os
+from dataclasses import replace
 from typing import Any, Literal
 
 import torch
@@ -29,13 +30,6 @@ from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none
 
 __all__ = ["QwenImagePipelineWithLogProb"]
-
-
-def maybe_to_cpu(value):
-    """Move a single value to CPU if it is a ``torch.Tensor``; else return unchanged."""
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu()
-    return value
 
 
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="flow_grpo")
@@ -611,18 +605,19 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             torch.stack(all_timesteps).unsqueeze(0).expand(state.latents.shape[0], -1) if all_timesteps else None
         )
 
-        output.output = maybe_to_cpu(output.output)
-
-        output.custom_output = {
-            "all_latents": maybe_to_cpu(stacked_latents),
-            "all_log_probs": maybe_to_cpu(stacked_log_probs),
-            "all_timesteps": maybe_to_cpu(stacked_timesteps),
-            "prompt_embeds": maybe_to_cpu(state.prompt_embeds),
-            "prompt_embeds_mask": maybe_to_cpu(state.prompt_embeds_mask),
-            "negative_prompt_embeds": maybe_to_cpu(state.negative_prompt_embeds),
-            "negative_prompt_embeds_mask": maybe_to_cpu(state.negative_prompt_embeds_mask),
-        }
-        return output
+        return replace(
+            output,
+            custom_output={
+                "all_latents": stacked_latents,
+                "all_log_probs": stacked_log_probs,
+                "all_timesteps": stacked_timesteps,
+                "prompt_embeds": state.prompt_embeds,
+                "prompt_embeds_mask": state.prompt_embeds_mask,
+                "negative_prompt_embeds": state.negative_prompt_embeds,
+                "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
+            },
+            to_cpu=True,
+        )
 
     def forward(
         self,
