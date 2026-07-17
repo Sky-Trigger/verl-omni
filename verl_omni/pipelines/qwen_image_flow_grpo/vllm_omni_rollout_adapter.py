@@ -21,6 +21,7 @@ import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
+from vllm_omni.diffusion.models.qwen_image.rope_utils import txt_seq_lens_from_embeds
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
@@ -277,17 +278,8 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         else:
             guidance = None
 
-        # Set RoPE length from padded embed width (match diffusers text_seq_len),
-        # not from mask.sum() (valid token count).  When Continuous Batching
-        # pads requests to a shared target_seq_len, mask.sum() would give
-        # different per-request RoPE lengths even though the embeddings have
-        # been padded to a uniform width.
-        txt_seq_lens = [int(prompt_embeds.shape[1])] * int(prompt_embeds.shape[0])
-        if negative_prompt_embeds is not None:
-            neg_seq_len = int(negative_prompt_embeds.shape[1])
-            negative_txt_seq_lens = [neg_seq_len] * int(negative_prompt_embeds.shape[0])
-        else:
-            negative_txt_seq_lens = None
+        txt_seq_lens = txt_seq_lens_from_embeds(prompt_embeds)
+        negative_txt_seq_lens = txt_seq_lens_from_embeds(negative_prompt_embeds)
 
         req_scheduler = copy.deepcopy(self.scheduler)
         req_scheduler.set_begin_index(0)
