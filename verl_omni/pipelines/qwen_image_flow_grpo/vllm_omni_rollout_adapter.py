@@ -207,7 +207,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
         if prompt_ids is None:
             raise ValueError(
-                "QwenImagePipelineWithLogProbStepwise.prepare_encode requires either "
+                f"{self.__class__.__name__}.prepare_encode requires either "
                 "'prompt_ids'/'prompt_token_ids' or a text 'prompt' on state.prompt."
             )
 
