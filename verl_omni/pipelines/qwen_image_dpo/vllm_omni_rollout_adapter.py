@@ -27,11 +27,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.qwen_image_flow_grpo.common import (
-    QwenImageTokenIdPromptMixin,
-    apply_true_cfg,
-    build_img_shapes,
-)
+from verl_omni.pipelines.qwen_image_flow_grpo.common import apply_true_cfg, build_img_shapes
 
 __all__ = ["QwenImageDPOPipeline"]
 
@@ -41,12 +37,46 @@ def _coalesce_not_none(value, default):
 
 
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="dpo")
-class QwenImageDPOPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeline):
+class QwenImageDPOPipeline(QwenImagePipeline):
     """Rollout pipeline that returns DPO training tensors with generated images."""
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()
+
+    def _extract_prompt_ids(self, prompts):
+        """Extract tokenized prompts, with a raw-text warm-up fallback."""
+        prompt_ids = None
+        prompt_mask = None
+        negative_prompt_ids = None
+        negative_prompt_mask = None
+        if prompts:
+            prompt = prompts[0]
+            if isinstance(prompt, dict):
+                prompt_ids = prompt.get("prompt_token_ids")
+                prompt_mask = prompt.get("prompt_mask")
+                negative_prompt_ids = prompt.get("negative_prompt_ids")
+                negative_prompt_mask = prompt.get("negative_prompt_mask")
+                if prompt_ids is None and prompt.get("prompt"):
+                    prompt_ids, prompt_mask = self._tokenize_text_prompt(prompt["prompt"])
+                if negative_prompt_ids is None and prompt.get("negative_prompt"):
+                    negative_prompt_ids, negative_prompt_mask = self._tokenize_text_prompt(prompt["negative_prompt"])
+            elif isinstance(prompt, str):
+                prompt_ids, prompt_mask = self._tokenize_text_prompt(prompt)
+        return prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask
+
+    def _tokenize_text_prompt(self, text: str | list[str]):
+        """Tokenize raw text with the Qwen chat template."""
+        prompt = [text] if isinstance(text, str) else text
+        formatted = [self.prompt_template_encode.format(item) for item in prompt]
+        tokens = self.tokenizer(
+            formatted,
+            max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        ).to(self.device)
+        return tokens.input_ids, tokens.attention_mask
 
     def prepare_encode(
         self,

@@ -48,6 +48,40 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         super().__init__(*args, **kwargs)
         self.set_progress_bar_config(disable=True)
 
+    def _extract_prompt_ids(self, prompts):
+        """Extract tokenized prompts, with a raw-text warm-up fallback."""
+        prompt_ids = None
+        prompt_mask = None
+        negative_prompt_ids = None
+        negative_prompt_mask = None
+        if prompts:
+            prompt = prompts[0]
+            if isinstance(prompt, dict):
+                prompt_ids = prompt.get("prompt_token_ids")
+                prompt_mask = prompt.get("prompt_mask")
+                negative_prompt_ids = prompt.get("negative_prompt_ids")
+                negative_prompt_mask = prompt.get("negative_prompt_mask")
+                if prompt_ids is None and prompt.get("prompt"):
+                    prompt_ids, prompt_mask = self._tokenize_text_prompt(prompt["prompt"])
+                if negative_prompt_ids is None and prompt.get("negative_prompt"):
+                    negative_prompt_ids, negative_prompt_mask = self._tokenize_text_prompt(prompt["negative_prompt"])
+            elif isinstance(prompt, str):
+                prompt_ids, prompt_mask = self._tokenize_text_prompt(prompt)
+        return prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask
+
+    def _tokenize_text_prompt(self, text: str | list[str]):
+        """Tokenize raw text with the Qwen chat template."""
+        prompt = [text] if isinstance(text, str) else text
+        formatted = [self.prompt_template_encode.format(item) for item in prompt]
+        tokens = self.tokenizer(
+            formatted,
+            max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        ).to(self.device)
+        return tokens.input_ids, tokens.attention_mask
+
     def prepare_encode(
         self,
         state: DiffusionRequestState,
