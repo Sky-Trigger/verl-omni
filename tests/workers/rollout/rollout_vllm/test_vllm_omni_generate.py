@@ -109,11 +109,52 @@ def _assert_flow_grpo_step_execution_contract(output: DiffusionOutput) -> None:
     assert prompt_embeds.shape[:-1] == prompt_embeds_mask.shape
 
 
+def _assert_training_step_execution_contract(
+    output: DiffusionOutput,
+    *,
+    algorithm: str,
+    include_train_timesteps: bool,
+) -> None:
+    """Validate algorithm-specific Qwen-Image training tensors."""
+    expected_extra_fields = {
+        "latents_clean",
+        "prompt_embeds",
+        "prompt_embeds_mask",
+        "negative_prompt_embeds",
+        "negative_prompt_embeds_mask",
+    }
+    if include_train_timesteps:
+        expected_extra_fields.add("train_timesteps")
+
+    missing_fields = expected_extra_fields - set(output.extra_fields)
+    assert not missing_fields, f"Missing {algorithm} step-execution fields: {sorted(missing_fields)}"
+
+    required_tensors = {
+        "latents_clean": output.extra_fields["latents_clean"],
+        "prompt_embeds": output.extra_fields["prompt_embeds"],
+        "prompt_embeds_mask": output.extra_fields["prompt_embeds_mask"],
+    }
+    if include_train_timesteps:
+        required_tensors["train_timesteps"] = output.extra_fields["train_timesteps"]
+    for field_name, value in required_tensors.items():
+        _assert_non_empty_tensor(value, field_name)
+
+    assert output.extra_fields["negative_prompt_embeds"] is None
+    assert output.extra_fields["negative_prompt_embeds_mask"] is None
+    assert output.extra_fields["prompt_embeds"].shape[:-1] == output.extra_fields["prompt_embeds_mask"].shape
+
+
 @pytest.fixture
 def init_server(request):
     """Create and launch a vLLMOmniHttpServer Ray actor with Qwen/Qwen-Image."""
     model_path = MODEL_PATH
-    step_execution = getattr(request, "param", False)
+    fixture_param = getattr(request, "param", False)
+    if isinstance(fixture_param, dict):
+        step_execution = fixture_param.get("step_execution", False)
+        algorithm = fixture_param.get("algorithm", "flow_grpo")
+    else:
+        step_execution = fixture_param
+        algorithm = "flow_grpo"
 
     ray.init(
         runtime_env={
@@ -171,7 +212,7 @@ def init_server(request):
             "trust_remote_code": True,
             "load_tokenizer": True,
             "attn_backend": attn_backend,
-            "algorithm": "flow_grpo",
+            "algorithm": algorithm,
         }
     )
 
@@ -289,3 +330,63 @@ def test_flow_grpo_step_execution_contract(init_server):
     assert output.stop_reason in ("completed", "aborted", None)
 
     _assert_flow_grpo_step_execution_contract(output)
+
+
+@pytest.mark.parametrize(
+    "init_server",
+    [{"step_execution": True, "algorithm": "diffusion_nft"}],
+    indirect=True,
+    ids=["diffusion-nft-step-execution"],
+)
+def test_diffusion_nft_step_execution_contract(init_server):
+    """Verify DiffusionNFT final-latent outputs with step_execution=True."""
+    prompt = (
+        "a detailed watercolor painting of a quiet forest stream surrounded by "
+        "mossy stones and tall green trees under soft morning sunlight"
+    )
+    output = ray.get(
+        init_server.generate.remote(
+            prompt_ids=_tokenize_prompt(prompt),
+            sampling_params={"num_inference_steps": 10, "height": 512, "width": 512},
+            request_id=f"diffusion_nft_step_execution_{uuid4().hex[:8]}",
+        ),
+        timeout=600,
+    )
+
+    assert isinstance(output, DiffusionOutput)
+    assert len(output.diffusion_output) == 3
+    _assert_training_step_execution_contract(
+        output,
+        algorithm="DiffusionNFT",
+        include_train_timesteps=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "init_server",
+    [{"step_execution": True, "algorithm": "dpo"}],
+    indirect=True,
+    ids=["dpo-step-execution"],
+)
+def test_dpo_step_execution_contract(init_server):
+    """Verify online DPO final-latent outputs with step_execution=True."""
+    prompt = (
+        "a cinematic photograph of a red tram crossing a rainy city street at "
+        "night with reflections from warm shop lights on the pavement"
+    )
+    output = ray.get(
+        init_server.generate.remote(
+            prompt_ids=_tokenize_prompt(prompt),
+            sampling_params={"num_inference_steps": 10, "height": 512, "width": 512},
+            request_id=f"dpo_step_execution_{uuid4().hex[:8]}",
+        ),
+        timeout=600,
+    )
+
+    assert isinstance(output, DiffusionOutput)
+    assert len(output.diffusion_output) == 3
+    _assert_training_step_execution_contract(
+        output,
+        algorithm="DPO",
+        include_train_timesteps=False,
+    )

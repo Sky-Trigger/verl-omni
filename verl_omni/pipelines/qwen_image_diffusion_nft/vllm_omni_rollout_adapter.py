@@ -13,13 +13,17 @@
 # limitations under the License.
 """Qwen-Image rollout adapter for DiffusionNFT."""
 
+import copy
+from dataclasses import replace
 from typing import Any
 
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
+from vllm_omni.diffusion.models.qwen_image.rope_utils import txt_seq_lens_from_embeds
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.utils.size_utils import normalize_min_aligned_size
+from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import (
@@ -43,6 +47,141 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_progress_bar_config(disable=True)
+
+    def prepare_encode(
+        self,
+        state: DiffusionRequestState,
+        **kwargs: Any,
+    ) -> DiffusionRequestState:
+        """Initialize the standard denoising state for DiffusionNFT.
+
+        DiffusionNFT only needs the final clean latent, so the normal
+        Qwen-Image scheduler lifecycle can be reused. This method adapts that
+        lifecycle to verl-omni's pre-tokenized prompt contract.
+        """
+        sampling = state.sampling
+        prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(
+            [state.prompt] if state.prompt is not None else []
+        )
+
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=self.device)
+        if isinstance(negative_prompt_ids, list):
+            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
+        if prompt_ids is None:
+            raise ValueError(
+                f"{self.__class__.__name__}.prepare_encode requires either "
+                "'prompt_token_ids' or a text 'prompt' on state.prompt."
+            )
+
+        height = sampling.height or self.default_sample_size * self.vae_scale_factor
+        width = sampling.width or self.default_sample_size * self.vae_scale_factor
+        height, width = normalize_min_aligned_size(height, width, self.vae_scale_factor * 2)
+        num_inference_steps = sampling.num_inference_steps or 50
+        guidance_scale = sampling.guidance_scale if sampling.guidance_scale_provided else 1.0
+        num_images_per_prompt = sampling.num_outputs_per_prompt if sampling.num_outputs_per_prompt > 0 else 1
+        true_cfg_scale = sampling.true_cfg_scale or 4.0
+        max_sequence_length = sampling.max_sequence_length or self.tokenizer_max_length
+
+        generator = sampling.generator
+        if generator is None and sampling.seed is not None:
+            generator = torch.Generator(device=self.device).manual_seed(sampling.seed)
+
+        self._guidance_scale = guidance_scale
+        self._attention_kwargs = kwargs.get("attention_kwargs") or {}
+        self._current_timestep = None
+        self._interrupt = False
+
+        batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+        has_neg_prompt = negative_prompt_ids is not None
+        do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
+        self.check_cfg_parallel_validity(true_cfg_scale, has_neg_prompt)
+
+        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
+            prompt_ids=prompt_ids,
+            attention_mask=prompt_mask,
+            num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_sequence_length,
+        )
+        if do_true_cfg:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
+                prompt_ids=negative_prompt_ids,
+                attention_mask=negative_prompt_mask,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+            )
+        else:
+            negative_prompt_embeds = None
+            negative_prompt_embeds_mask = None
+
+        num_channels_latents = self.transformer.in_channels // 4
+        latents = self.prepare_latents(
+            batch_size * num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            prompt_embeds.dtype,
+            self.device,
+            generator,
+            None,
+        )
+        timesteps, _ = self.prepare_timesteps(num_inference_steps, sampling.sigmas, latents.shape[1])
+        self._num_timesteps = len(timesteps)
+
+        if self.transformer.guidance_embeds:
+            guidance = torch.full([1], guidance_scale, dtype=torch.float32).expand(latents.shape[0])
+        else:
+            guidance = None
+
+        req_scheduler = copy.deepcopy(self.scheduler)
+        req_scheduler.set_begin_index(0)
+
+        state.prompt_embeds = prompt_embeds
+        state.prompt_embeds_mask = prompt_embeds_mask
+        state.negative_prompt_embeds = negative_prompt_embeds
+        state.negative_prompt_embeds_mask = negative_prompt_embeds_mask
+        state.latents = latents
+        state.timesteps = timesteps
+        state.step_index = 0
+        state.scheduler = req_scheduler
+        state.do_true_cfg = do_true_cfg
+        state.guidance = guidance
+        state.img_shapes = build_img_shapes(height, width, batch_size, self.vae_scale_factor)
+        state.txt_seq_lens = txt_seq_lens_from_embeds(prompt_embeds)
+        state.negative_txt_seq_lens = txt_seq_lens_from_embeds(negative_prompt_embeds)
+        state.sampling.cfg_normalize = True
+        state.extra["height"] = height
+        state.extra["width"] = width
+        return state
+
+    def post_decode(
+        self,
+        state: DiffusionRequestState,
+        **kwargs: Any,
+    ) -> DiffusionOutput:
+        """Decode and restore DiffusionNFT's training-output contract."""
+        self._current_timestep = None
+        height = state.extra.get("height", state.sampling.height)
+        width = state.extra.get("width", state.sampling.width)
+        height = height or self.default_sample_size * self.vae_scale_factor
+        width = width or self.default_sample_size * self.vae_scale_factor
+        output_type = kwargs.get("output_type") or state.sampling.output_type or "pil"
+        output = self._decode_latents(state.latents, height, width, output_type)
+
+        latents_clean = state.latents.float()
+        train_timesteps = state.timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1)
+        return replace(
+            output,
+            custom_output={
+                "latents_clean": latents_clean,
+                "train_timesteps": train_timesteps,
+                "prompt_embeds": state.prompt_embeds,
+                "prompt_embeds_mask": state.prompt_embeds_mask,
+                "negative_prompt_embeds": state.negative_prompt_embeds,
+                "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
+            },
+            to_cpu=True,
+        )
 
     def _prepare_token_id_generation_context(
         self,
