@@ -102,10 +102,11 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         height = sampling.height or self.default_sample_size * self.vae_scale_factor
         width = sampling.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling.num_inference_steps or 50
+        sigmas = sampling.sigmas or None
         guidance_scale = sampling.guidance_scale if sampling.guidance_scale_provided else 1.0
         num_images_per_prompt = sampling.num_outputs_per_prompt if sampling.num_outputs_per_prompt > 0 else 1
-        true_cfg_scale = sampling.true_cfg_scale or 4.0
-        max_sequence_length = sampling.max_sequence_length or self.tokenizer_max_length
+        true_cfg_scale = _coalesce_not_none(sampling.true_cfg_scale, 4.0)
+        max_sequence_length = sampling.max_sequence_length or 512
 
         generator = sampling.generator
         if generator is None and sampling.seed is not None:
@@ -139,17 +140,19 @@ class QwenImageDPOPipeline(QwenImagePipeline):
             negative_prompt_embeds_mask = None
 
         num_channels_latents = self.transformer.in_channels // 4
+        # Match full-forward random initialisation in model dtype, then cast
+        # the exact same values to fp32 for homogeneous live step state.
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
             width,
-            torch.float32,
+            prompt_embeds.dtype,
             self.device,
             generator,
             None,
-        )
-        timesteps, _ = self.prepare_timesteps(num_inference_steps, sampling.sigmas, latents.shape[1])
+        ).float()
+        timesteps, _ = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
         self._num_timesteps = len(timesteps)
 
         if self.transformer.guidance_embeds:
@@ -238,13 +241,14 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         **kwargs: Any,
     ) -> DiffusionOutput:
         """Decode and restore online DPO's training-output contract."""
+        del kwargs
         self._current_timestep = None
         height = state.extra.get("height", state.sampling.height)
         width = state.extra.get("width", state.sampling.width)
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
-        output_type = kwargs.get("output_type") or state.sampling.output_type or "pil"
-        output = self._decode_latents(state.latents, height, width, output_type)
+        # The non-step DPO path always decodes an image for reward scoring.
+        output = self._decode_latents(state.latents, height, width, "pil")
 
         return replace(
             output,
@@ -353,7 +357,10 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
+        sigmas = sampling_params.sigmas or sigmas
         max_sequence_length = sampling_params.max_sequence_length or max_sequence_length
+        if sampling_params.guidance_scale_provided:
+            guidance_scale = sampling_params.guidance_scale
 
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:
@@ -384,6 +391,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
             negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
         )
         do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
+        self.check_cfg_parallel_validity(true_cfg_scale, has_neg_prompt)
 
         prompt_embeds, prompt_embeds_mask = self.encode_prompt(
             prompt_ids=prompt_ids,
@@ -428,10 +436,8 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         if self.attention_kwargs is None:
             self._attention_kwargs = {}
 
-        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
-        negative_txt_seq_lens = (
-            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
-        )
+        txt_seq_lens = txt_seq_lens_from_embeds(prompt_embeds)
+        negative_txt_seq_lens = txt_seq_lens_from_embeds(negative_prompt_embeds)
 
         self.scheduler.set_begin_index(0)
         for timestep_value in timesteps:
@@ -439,8 +445,8 @@ class QwenImageDPOPipeline(QwenImagePipeline):
                 continue
 
             self._current_timestep = timestep_value
-            timestep = timestep_value.expand(latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
             x = latents.to(self.transformer.img_in.weight.dtype)
+            timestep = timestep_value.expand(latents.shape[0]).to(device=x.device, dtype=x.dtype)
             self.transformer.do_true_cfg = do_true_cfg
             noise_pred = self.transformer(
                 hidden_states=x,

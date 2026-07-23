@@ -98,10 +98,6 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
             [state.prompt] if state.prompt is not None else []
         )
 
-        if isinstance(prompt_ids, list):
-            prompt_ids = torch.tensor(prompt_ids, device=self.device)
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
         if prompt_ids is None:
             raise ValueError(
                 f"{self.__class__.__name__}.prepare_encode requires either "
@@ -112,77 +108,56 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         width = sampling.width or self.default_sample_size * self.vae_scale_factor
         height, width = normalize_min_aligned_size(height, width, self.vae_scale_factor * 2)
         num_inference_steps = sampling.num_inference_steps or 50
+        sigmas = sampling.sigmas or None
         guidance_scale = sampling.guidance_scale if sampling.guidance_scale_provided else 1.0
         num_images_per_prompt = sampling.num_outputs_per_prompt if sampling.num_outputs_per_prompt > 0 else 1
-        true_cfg_scale = sampling.true_cfg_scale or 4.0
-        max_sequence_length = sampling.max_sequence_length or self.tokenizer_max_length
+        true_cfg_scale = coalesce_not_none(sampling.true_cfg_scale, 4.0)
+        max_sequence_length = sampling.max_sequence_length or 512
 
         generator = sampling.generator
         if generator is None and sampling.seed is not None:
             generator = torch.Generator(device=self.device).manual_seed(sampling.seed)
 
-        self._guidance_scale = guidance_scale
-        self._attention_kwargs = kwargs.get("attention_kwargs") or {}
-        self._current_timestep = None
-        self._interrupt = False
-
-        batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
-        has_neg_prompt = negative_prompt_ids is not None
-        do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
-        self.check_cfg_parallel_validity(true_cfg_scale, has_neg_prompt)
-
-        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
+        # Reuse the full-forward setup helper so prompt conversion, CFG,
+        # latent dtype, timestep preparation, and RoPE metadata stay aligned.
+        ctx = self._prepare_token_id_generation_context(
             prompt_ids=prompt_ids,
-            attention_mask=prompt_mask,
+            prompt_mask=prompt_mask,
+            negative_prompt_ids=negative_prompt_ids,
+            negative_prompt_mask=negative_prompt_mask,
+            true_cfg_scale=true_cfg_scale,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            sigmas=sigmas,
+            guidance_scale=guidance_scale,
             num_images_per_prompt=num_images_per_prompt,
+            generator=generator,
+            latents=None,
+            prompt_embeds=None,
+            prompt_embeds_mask=None,
+            negative_prompt_embeds=None,
+            negative_prompt_embeds_mask=None,
+            attention_kwargs=kwargs.get("attention_kwargs"),
             max_sequence_length=max_sequence_length,
         )
-        if do_true_cfg:
-            negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
-                prompt_ids=negative_prompt_ids,
-                attention_mask=negative_prompt_mask,
-                num_images_per_prompt=num_images_per_prompt,
-                max_sequence_length=max_sequence_length,
-            )
-        else:
-            negative_prompt_embeds = None
-            negative_prompt_embeds_mask = None
-
-        num_channels_latents = self.transformer.in_channels // 4
-        latents = self.prepare_latents(
-            batch_size * num_images_per_prompt,
-            num_channels_latents,
-            height,
-            width,
-            prompt_embeds.dtype,
-            self.device,
-            generator,
-            None,
-        )
-        timesteps, _ = self.prepare_timesteps(num_inference_steps, sampling.sigmas, latents.shape[1])
-        self._num_timesteps = len(timesteps)
-
-        if self.transformer.guidance_embeds:
-            guidance = torch.full([1], guidance_scale, dtype=torch.float32).expand(latents.shape[0])
-        else:
-            guidance = None
 
         req_scheduler = copy.deepcopy(self.scheduler)
         req_scheduler.set_begin_index(0)
 
-        state.prompt_embeds = prompt_embeds
-        state.prompt_embeds_mask = prompt_embeds_mask
-        state.negative_prompt_embeds = negative_prompt_embeds
-        state.negative_prompt_embeds_mask = negative_prompt_embeds_mask
-        state.latents = latents
-        state.timesteps = timesteps
+        state.prompt_embeds = ctx["prompt_embeds"]
+        state.prompt_embeds_mask = ctx["prompt_embeds_mask"]
+        state.negative_prompt_embeds = ctx["negative_prompt_embeds"]
+        state.negative_prompt_embeds_mask = ctx["negative_prompt_embeds_mask"]
+        state.latents = ctx["latents"]
+        state.timesteps = ctx["timesteps"]
         state.step_index = 0
         state.scheduler = req_scheduler
-        state.do_true_cfg = do_true_cfg
-        state.guidance = guidance
-        state.img_shapes = build_img_shapes(height, width, batch_size, self.vae_scale_factor)
-        state.txt_seq_lens = txt_seq_lens_from_embeds(prompt_embeds)
-        state.negative_txt_seq_lens = txt_seq_lens_from_embeds(negative_prompt_embeds)
+        state.do_true_cfg = ctx["do_true_cfg"]
+        state.guidance = ctx["guidance"]
+        state.img_shapes = ctx["img_shapes"]
+        state.txt_seq_lens = ctx["txt_seq_lens"]
+        state.negative_txt_seq_lens = ctx["negative_txt_seq_lens"]
         state.sampling.cfg_normalize = True
         state.extra["height"] = height
         state.extra["width"] = width
@@ -306,10 +281,8 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         else:
             guidance = None
 
-        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
-        negative_txt_seq_lens = (
-            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
-        )
+        txt_seq_lens = txt_seq_lens_from_embeds(prompt_embeds)
+        negative_txt_seq_lens = txt_seq_lens_from_embeds(negative_prompt_embeds)
 
         return {
             "prompt_embeds": prompt_embeds,
@@ -367,6 +340,7 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
         sigmas = sampling_params.sigmas or sigmas
         max_sequence_length = sampling_params.max_sequence_length or max_sequence_length
+        output_type = sampling_params.output_type or output_type
 
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:

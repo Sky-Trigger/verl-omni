@@ -139,6 +139,7 @@ def _assert_training_step_execution_contract(
     for field_name, value in required_tensors.items():
         _assert_non_empty_tensor(value, field_name)
 
+    assert output.extra_fields["latents_clean"].dtype == torch.float32
     assert output.extra_fields["negative_prompt_embeds"] is None
     assert output.extra_fields["negative_prompt_embeds_mask"] is None
     assert output.extra_fields["prompt_embeds"].shape[:-1] == output.extra_fields["prompt_embeds_mask"].shape

@@ -216,7 +216,7 @@ the full-forward path.
 Choose the live-latent dtype from the algorithm's scheduler and full-forward
 semantics, and keep it homogeneous across all in-flight requests.
 
-FlowGRPO, MixGRPO, and online DPO use float32 live latents:
+FlowGRPO and MixGRPO create and keep float32 live latents:
 
 ```python
 latents = self.prepare_latents(
@@ -232,6 +232,26 @@ latents = self.prepare_latents(
 ```
 
 Prepare the same timestep schedule used by `forward()`.
+
+Online DPO preserves seeded parity with its full-forward path by generating the
+initial noise in `prompt_embeds.dtype` first and then casting those exact values
+to float32 for live step state:
+
+```python
+latents = self.prepare_latents(
+    batch_size,
+    num_channels_latents,
+    height,
+    width,
+    prompt_embeds.dtype,
+    self.device,
+    generator,
+    None,
+).float()
+```
+
+Generating directly in float32 would consume the same seed through a different
+dtype path and would not reproduce the non-step initial latent values.
 
 DiffusionNFT reuses the standard Qwen-Image denoising and scheduler methods, so
 it prepares latents in the prompt-embedding/model dtype. The standard scheduler
@@ -688,9 +708,15 @@ The canonical regression test is:
 
 Run parity checks between `step_execution=False` and `step_execution=True` for:
 
+- resolved height, width, inference steps, sigmas, guidance scales, output count,
+  and maximum sequence length;
+- seed/generator handling and initial latent values;
 - output field names and shapes;
 - fp32 stored latents;
 - prompt embedding and mask values;
+- text RoPE lengths derived from padded embedding width;
+- model-input, timestep, noise-prediction, scheduler-input, and live-state
+  dtypes at the first and subsequent steps;
 - SDE-window selection;
 - first-step `ratio_mean`, KL, and clipping metrics;
 - seeded reproducibility;
