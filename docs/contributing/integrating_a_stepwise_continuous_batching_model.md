@@ -211,31 +211,26 @@ negative_prompt_embeds_mask
 Preserve the same prompt template, truncation, padding, and CFG semantics used by
 the full-forward path.
 
+Qwen-Image text-to-image rollout adapters should reuse
+`QwenImageTokenIdPromptMixin._prepare_prompt_context()` from
+`qwen_image_flow_grpo/common.py`. It centralizes token-ID/list conversion,
+raw-text warm-up fallback, positive and negative prompt encoding, batch-size
+resolution, and True-CFG validation without making assumptions about latent
+dtype, scheduler state, or algorithm output fields.
+
+Qwen-Image-Edit intentionally keeps its own `encode_prompt()` override because
+its text encoder also consumes condition-image features. Do not route the edit
+pipeline through the text-only prompt-context helper; share only the generic
+utilities whose semantics are identical.
+
 ### Latents and timesteps
 
 Choose the live-latent dtype from the algorithm's scheduler and full-forward
 semantics, and keep it homogeneous across all in-flight requests.
 
-FlowGRPO and MixGRPO create and keep float32 live latents:
-
-```python
-latents = self.prepare_latents(
-    batch_size,
-    num_channels_latents,
-    height,
-    width,
-    torch.float32,
-    self.device,
-    generator,
-    None,
-)
-```
-
-Prepare the same timestep schedule used by `forward()`.
-
-Online DPO preserves seeded parity with its full-forward path by generating the
-initial noise in `prompt_embeds.dtype` first and then casting those exact values
-to float32 for live step state:
+FlowGRPO, MixGRPO, and online DPO preserve seeded parity with their full-forward
+paths by generating the initial noise in `prompt_embeds.dtype` first and then
+casting those exact values to float32 for live step state:
 
 ```python
 latents = self.prepare_latents(
@@ -252,6 +247,8 @@ latents = self.prepare_latents(
 
 Generating directly in float32 would consume the same seed through a different
 dtype path and would not reproduce the non-step initial latent values.
+
+Prepare the same timestep schedule used by `forward()`.
 
 DiffusionNFT reuses the standard Qwen-Image denoising and scheduler methods, so
 it prepares latents in the prompt-embedding/model dtype. The standard scheduler

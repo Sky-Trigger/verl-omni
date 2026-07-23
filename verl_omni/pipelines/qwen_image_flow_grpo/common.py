@@ -12,7 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
+
 import torch
+
+
+@dataclass(frozen=True)
+class QwenImagePromptContext:
+    """Prompt tensors shared by Qwen-Image rollout adapters."""
+
+    batch_size: int
+    prompt_embeds: torch.Tensor
+    prompt_embeds_mask: torch.Tensor
+    negative_prompt_embeds: torch.Tensor | None
+    negative_prompt_embeds_mask: torch.Tensor | None
+    do_true_cfg: bool
+
 
 QWEN_IMAGE_VAE_SCALE_FACTOR = 8
 
@@ -42,6 +57,40 @@ def apply_true_cfg(
 
 class QwenImageTokenIdPromptMixin:
     """Encode pre-tokenized Qwen-Image prompts for rollout adapters."""
+
+    def _extract_prompt_ids(self, prompts):
+        """Extract tokenized prompts, with a raw-text warm-up fallback."""
+        prompt_ids = None
+        prompt_mask = None
+        negative_prompt_ids = None
+        negative_prompt_mask = None
+        if prompts:
+            prompt = prompts[0]
+            if isinstance(prompt, dict):
+                prompt_ids = prompt.get("prompt_token_ids")
+                prompt_mask = prompt.get("prompt_mask")
+                negative_prompt_ids = prompt.get("negative_prompt_ids")
+                negative_prompt_mask = prompt.get("negative_prompt_mask")
+                if prompt_ids is None and prompt.get("prompt"):
+                    prompt_ids, prompt_mask = self._tokenize_text_prompt(prompt["prompt"])
+                if negative_prompt_ids is None and prompt.get("negative_prompt"):
+                    negative_prompt_ids, negative_prompt_mask = self._tokenize_text_prompt(prompt["negative_prompt"])
+            elif isinstance(prompt, str):
+                prompt_ids, prompt_mask = self._tokenize_text_prompt(prompt)
+        return prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask
+
+    def _tokenize_text_prompt(self, text: str | list[str]):
+        """Tokenize raw text with the Qwen chat template."""
+        prompt = [text] if isinstance(text, str) else text
+        formatted = [self.prompt_template_encode.format(item) for item in prompt]
+        tokens = self.tokenizer(
+            formatted,
+            max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        ).to(self.device)
+        return tokens.input_ids, tokens.attention_mask
 
     def _get_qwen_prompt_embeds(
         self,
@@ -106,3 +155,71 @@ class QwenImageTokenIdPromptMixin:
             prompt_embeds_mask = prompt_embeds_mask.repeat_interleave(num_images_per_prompt, dim=0)
 
         return prompt_embeds, prompt_embeds_mask
+
+    def _prepare_prompt_context(
+        self,
+        *,
+        prompt_ids: torch.Tensor | list[int] | None,
+        prompt_mask: torch.Tensor | None,
+        negative_prompt_ids: torch.Tensor | list[int] | None,
+        negative_prompt_mask: torch.Tensor | None,
+        true_cfg_scale: float,
+        num_images_per_prompt: int,
+        max_sequence_length: int,
+        prompt_embeds: torch.Tensor | None = None,
+        prompt_embeds_mask: torch.Tensor | None = None,
+        negative_prompt_embeds: torch.Tensor | None = None,
+        negative_prompt_embeds_mask: torch.Tensor | None = None,
+    ) -> QwenImagePromptContext:
+        """Prepare text conditioning without algorithm-specific latent state.
+
+        Qwen-Image-Edit overrides ``encode_prompt`` because it also consumes
+        condition images and therefore intentionally does not use this helper.
+        """
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=self.device)
+        if isinstance(negative_prompt_ids, list):
+            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
+
+        if prompt_ids is not None:
+            batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+        elif prompt_embeds is not None:
+            batch_size = prompt_embeds.shape[0]
+        else:
+            raise ValueError("Qwen-Image rollout requires either `prompt_ids` or `prompt_embeds`.")
+
+        has_neg_prompt = negative_prompt_ids is not None or (
+            negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
+        )
+        do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
+        self.check_cfg_parallel_validity(true_cfg_scale, has_neg_prompt)
+
+        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
+            prompt_ids=prompt_ids,
+            attention_mask=prompt_mask,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_sequence_length,
+        )
+        if do_true_cfg:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
+                prompt_ids=negative_prompt_ids,
+                attention_mask=negative_prompt_mask,
+                prompt_embeds=negative_prompt_embeds,
+                prompt_embeds_mask=negative_prompt_embeds_mask,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+            )
+        else:
+            negative_prompt_embeds = None
+            negative_prompt_embeds_mask = None
+
+        return QwenImagePromptContext(
+            batch_size=batch_size,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            do_true_cfg=do_true_cfg,
+        )
