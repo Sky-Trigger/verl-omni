@@ -211,18 +211,6 @@ negative_prompt_embeds_mask
 Preserve the same prompt template, truncation, padding, and CFG semantics used by
 the full-forward path.
 
-Qwen-Image text-to-image rollout adapters should reuse
-`QwenImageTokenIdPromptMixin._prepare_prompt_context()` from
-`qwen_image_flow_grpo/common.py`. It centralizes token-ID/list conversion,
-raw-text warm-up fallback, positive and negative prompt encoding, batch-size
-resolution, and True-CFG validation without making assumptions about latent
-dtype, scheduler state, or algorithm output fields.
-
-Qwen-Image-Edit intentionally keeps its own `encode_prompt()` override because
-its text encoder also consumes condition-image features. Do not route the edit
-pipeline through the text-only prompt-context helper; share only the generic
-utilities whose semantics are identical.
-
 ### Latents and timesteps
 
 Choose the live-latent dtype from the algorithm's scheduler and full-forward

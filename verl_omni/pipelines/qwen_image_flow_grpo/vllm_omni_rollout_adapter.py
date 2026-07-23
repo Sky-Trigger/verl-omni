@@ -58,6 +58,47 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             local_files_only=local_files_only,
         )
 
+    def _extract_prompt_ids(self, prompts):
+        """Extract prompt_ids/mask and their negatives from the OmniCustomPrompt list.
+
+        Falls back to tokenizing ``"prompt"`` / ``"negative_prompt"`` text fields
+        when ``prompt_ids`` is not provided (e.g. during the engine's dummy
+        warm-up run, which always submits a text prompt).
+        """
+        prompt_ids = None
+        prompt_mask = None
+        negative_prompt_ids = None
+        negative_prompt_mask = None
+        if prompts:
+            p0 = prompts[0]
+            if isinstance(p0, dict):
+                prompt_ids = p0.get("prompt_token_ids", None)
+                prompt_mask = p0.get("prompt_mask", None)
+                negative_prompt_ids = p0.get("negative_prompt_ids", None)
+                negative_prompt_mask = p0.get("negative_prompt_mask", None)
+
+                # Fallback: tokenize raw text prompt (covers _dummy_run path).
+                if prompt_ids is None and p0.get("prompt"):
+                    prompt_ids, prompt_mask = self._tokenize_text_prompt(p0["prompt"])
+                if negative_prompt_ids is None and p0.get("negative_prompt"):
+                    negative_prompt_ids, negative_prompt_mask = self._tokenize_text_prompt(p0["negative_prompt"])
+            elif isinstance(p0, str):
+                prompt_ids, prompt_mask = self._tokenize_text_prompt(p0)
+        return prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask
+
+    def _tokenize_text_prompt(self, text: str | list[str]):
+        """Tokenize a text prompt using the Qwen chat template (parent behavior)."""
+        prompt = [text] if isinstance(text, str) else text
+        txt = [self.prompt_template_encode.format(e) for e in prompt]
+        tokens = self.tokenizer(
+            txt,
+            max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        ).to(self.device)
+        return tokens.input_ids, tokens.attention_mask
+
     def prepare_encode(
         self,
         state: "DiffusionRequestState",
@@ -75,6 +116,12 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(
             [state.prompt] if state.prompt is not None else []
         )
+
+        # Normalize list inputs to tensors on device.
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=self.device)
+        if isinstance(negative_prompt_ids, list):
+            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
 
         if prompt_ids is None:
             raise ValueError(
@@ -100,20 +147,27 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         self._current_timestep = None
         self._interrupt = False
 
-        prompt_ctx = self._prepare_prompt_context(
+        batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+        has_neg_prompt = negative_prompt_ids is not None
+        do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
+        self.check_cfg_parallel_validity(true_cfg_scale, has_neg_prompt)
+
+        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
             prompt_ids=prompt_ids,
-            prompt_mask=prompt_mask,
-            negative_prompt_ids=negative_prompt_ids,
-            negative_prompt_mask=negative_prompt_mask,
-            true_cfg_scale=true_cfg_scale,
+            attention_mask=prompt_mask,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_sequence_length,
         )
-        batch_size = prompt_ctx.batch_size
-        prompt_embeds = prompt_ctx.prompt_embeds
-        prompt_embeds_mask = prompt_ctx.prompt_embeds_mask
-        negative_prompt_embeds = prompt_ctx.negative_prompt_embeds
-        negative_prompt_embeds_mask = prompt_ctx.negative_prompt_embeds_mask
+        if do_true_cfg:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
+                prompt_ids=negative_prompt_ids,
+                attention_mask=negative_prompt_mask,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+            )
+        else:
+            negative_prompt_embeds = None
+            negative_prompt_embeds_mask = None
 
         num_channels_latents = self.transformer.in_channels // 4
         latents = self.prepare_latents(
@@ -172,7 +226,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         state.timesteps = timesteps
         state.step_index = 0
         state.scheduler = req_scheduler
-        state.do_true_cfg = prompt_ctx.do_true_cfg
+        state.do_true_cfg = do_true_cfg
         state.guidance = guidance
         state.img_shapes = img_shapes
         state.txt_seq_lens = txt_seq_lens
@@ -595,30 +649,46 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         self._current_timestep = None
         self._interrupt = False
 
-        if prompt_token_ids is None and prompt_embeds is None:
+        if prompt_token_ids is not None:
+            if isinstance(prompt_token_ids, list):
+                prompt_token_ids = torch.tensor(prompt_token_ids, device=self.device)
+            batch_size = prompt_token_ids.shape[0] if prompt_token_ids.ndim == 2 else 1
+        elif prompt_embeds is not None:
+            batch_size = prompt_embeds.shape[0]
+        else:
             # Both prompt_token_ids and prompt_embeds are None (e.g. during warmup/dummy run).
             # Return a minimal dummy output to avoid crashing.
             return DiffusionOutput(output=None, custom_output={})
 
-        prompt_ctx = self._prepare_prompt_context(
+        if isinstance(negative_prompt_ids, list):
+            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
+
+        has_neg_prompt = negative_prompt_ids is not None or (
+            negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
+        )
+        do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
+        self.check_cfg_parallel_validity(true_cfg_scale, has_neg_prompt)
+
+        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
             prompt_ids=prompt_token_ids,
-            prompt_mask=prompt_mask,
-            negative_prompt_ids=negative_prompt_ids,
-            negative_prompt_mask=negative_prompt_mask,
-            true_cfg_scale=true_cfg_scale,
+            attention_mask=prompt_mask,
             prompt_embeds=prompt_embeds,
             prompt_embeds_mask=prompt_embeds_mask,
-            negative_prompt_embeds=negative_prompt_embeds,
-            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_sequence_length,
         )
-        batch_size = prompt_ctx.batch_size
-        prompt_embeds = prompt_ctx.prompt_embeds
-        prompt_embeds_mask = prompt_ctx.prompt_embeds_mask
-        negative_prompt_embeds = prompt_ctx.negative_prompt_embeds
-        negative_prompt_embeds_mask = prompt_ctx.negative_prompt_embeds_mask
-        do_true_cfg = prompt_ctx.do_true_cfg
+        if do_true_cfg:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
+                prompt_ids=negative_prompt_ids,
+                attention_mask=negative_prompt_mask,
+                prompt_embeds=negative_prompt_embeds,
+                prompt_embeds_mask=negative_prompt_embeds_mask,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+            )
+        else:
+            negative_prompt_embeds = None
+            negative_prompt_embeds_mask = None
 
         num_channels_latents = self.transformer.in_channels // 4
         latents = self.prepare_latents(
