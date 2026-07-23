@@ -20,7 +20,6 @@ from typing import Any
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
-from vllm_omni.diffusion.models.qwen_image.rope_utils import txt_seq_lens_from_embeds
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.utils.size_utils import normalize_min_aligned_size
 from vllm_omni.diffusion.worker.utils import DiffusionRequestState
@@ -48,29 +47,27 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         super().__init__(*args, **kwargs)
         self.set_progress_bar_config(disable=True)
 
-    def _extract_prompt_ids(self, prompts):
+    def _extract_step_prompt_ids(self, prompt):
         """Extract tokenized prompts, with a raw-text warm-up fallback."""
         prompt_ids = None
         prompt_mask = None
         negative_prompt_ids = None
         negative_prompt_mask = None
-        if prompts:
-            prompt = prompts[0]
-            if isinstance(prompt, dict):
-                prompt_ids = prompt.get("prompt_token_ids")
-                prompt_mask = prompt.get("prompt_mask")
-                negative_prompt_ids = prompt.get("negative_prompt_ids")
-                negative_prompt_mask = prompt.get("negative_prompt_mask")
-                if prompt_ids is None and prompt.get("prompt"):
-                    prompt_ids, prompt_mask = self._tokenize_text_prompt(prompt["prompt"])
-                if negative_prompt_ids is None and prompt.get("negative_prompt"):
-                    negative_prompt_ids, negative_prompt_mask = self._tokenize_text_prompt(prompt["negative_prompt"])
-            elif isinstance(prompt, str):
-                prompt_ids, prompt_mask = self._tokenize_text_prompt(prompt)
+        if isinstance(prompt, dict):
+            prompt_ids = prompt.get("prompt_token_ids")
+            prompt_mask = prompt.get("prompt_mask")
+            negative_prompt_ids = prompt.get("negative_prompt_ids")
+            negative_prompt_mask = prompt.get("negative_prompt_mask")
+            if prompt_ids is None and prompt.get("prompt"):
+                prompt_ids, prompt_mask = self._tokenize_step_prompt(prompt["prompt"])
+            if negative_prompt_ids is None and prompt.get("negative_prompt"):
+                negative_prompt_ids, negative_prompt_mask = self._tokenize_step_prompt(prompt["negative_prompt"])
+        elif isinstance(prompt, str):
+            prompt_ids, prompt_mask = self._tokenize_step_prompt(prompt)
         return prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask
 
-    def _tokenize_text_prompt(self, text: str | list[str]):
-        """Tokenize raw text with the Qwen chat template."""
+    def _tokenize_step_prompt(self, text: str | list[str]):
+        """Tokenize raw text for the step-execution warm-up request."""
         prompt = [text] if isinstance(text, str) else text
         formatted = [self.prompt_template_encode.format(item) for item in prompt]
         tokens = self.tokenizer(
@@ -87,17 +84,9 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         state: DiffusionRequestState,
         **kwargs: Any,
     ) -> DiffusionRequestState:
-        """Initialize the standard denoising state for DiffusionNFT.
-
-        DiffusionNFT only needs the final clean latent, so the normal
-        Qwen-Image scheduler lifecycle can be reused. This method adapts that
-        lifecycle to verl-omni's pre-tokenized prompt contract.
-        """
+        """Initialize request-local state for step execution."""
         sampling = state.sampling
-        prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(
-            [state.prompt] if state.prompt is not None else []
-        )
-
+        prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_step_prompt_ids(state.prompt)
         if prompt_ids is None:
             raise ValueError(
                 f"{self.__class__.__name__}.prepare_encode requires either "
@@ -118,8 +107,6 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         if generator is None and sampling.seed is not None:
             generator = torch.Generator(device=self.device).manual_seed(sampling.seed)
 
-        # Reuse the full-forward setup helper so prompt conversion, CFG,
-        # latent dtype, timestep preparation, and RoPE metadata stay aligned.
         ctx = self._prepare_token_id_generation_context(
             prompt_ids=prompt_ids,
             prompt_mask=prompt_mask,
@@ -142,8 +129,8 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
             max_sequence_length=max_sequence_length,
         )
 
-        req_scheduler = copy.deepcopy(self.scheduler)
-        req_scheduler.set_begin_index(0)
+        request_scheduler = copy.deepcopy(self.scheduler)
+        request_scheduler.set_begin_index(0)
 
         state.prompt_embeds = ctx["prompt_embeds"]
         state.prompt_embeds_mask = ctx["prompt_embeds_mask"]
@@ -152,7 +139,7 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         state.latents = ctx["latents"]
         state.timesteps = ctx["timesteps"]
         state.step_index = 0
-        state.scheduler = req_scheduler
+        state.scheduler = request_scheduler
         state.do_true_cfg = ctx["do_true_cfg"]
         state.guidance = ctx["guidance"]
         state.img_shapes = ctx["img_shapes"]
@@ -168,22 +155,18 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         state: DiffusionRequestState,
         **kwargs: Any,
     ) -> DiffusionOutput:
-        """Decode and restore DiffusionNFT's training-output contract."""
+        """Decode step execution output with DiffusionNFT training tensors."""
         self._current_timestep = None
-        height = state.extra.get("height", state.sampling.height)
-        width = state.extra.get("width", state.sampling.width)
-        height = height or self.default_sample_size * self.vae_scale_factor
-        width = width or self.default_sample_size * self.vae_scale_factor
-        output_type = kwargs.get("output_type") or state.sampling.output_type or "pil"
-        output = self._decode_latents(state.latents, height, width, output_type)
+        height = state.extra["height"]
+        width = state.extra["width"]
+        output = self._decode_latents(state.latents, height, width, kwargs.get("output_type") or "pil")
 
         latents_clean = state.latents.float()
-        train_timesteps = state.timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1)
         return replace(
             output,
             custom_output={
                 "latents_clean": latents_clean,
-                "train_timesteps": train_timesteps,
+                "train_timesteps": state.timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1),
                 "prompt_embeds": state.prompt_embeds,
                 "prompt_embeds_mask": state.prompt_embeds_mask,
                 "negative_prompt_embeds": state.negative_prompt_embeds,
@@ -281,8 +264,10 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         else:
             guidance = None
 
-        txt_seq_lens = txt_seq_lens_from_embeds(prompt_embeds)
-        negative_txt_seq_lens = txt_seq_lens_from_embeds(negative_prompt_embeds)
+        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
+        negative_txt_seq_lens = (
+            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
+        )
 
         return {
             "prompt_embeds": prompt_embeds,
@@ -340,7 +325,6 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
         sigmas = sampling_params.sigmas or sigmas
         max_sequence_length = sampling_params.max_sequence_length or max_sequence_length
-        output_type = sampling_params.output_type or output_type
 
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:
