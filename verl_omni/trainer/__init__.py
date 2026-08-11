@@ -12,4 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import verl_omni.trainer.omni  # noqa: F401
+from verl_omni.trainer.verl_patches import apply_opd_padding_patch
+
+apply_opd_padding_patch()
+
+import verl_omni.trainer.omni  # noqa: E402, F401
