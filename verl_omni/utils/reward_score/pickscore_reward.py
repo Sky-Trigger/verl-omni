@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_id, get_device_name
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -49,14 +49,14 @@ def _feature_tensor(features):
 
 
 class _PickScoreInferencer:
-    def __init__(self, device: str | None = None, dtype=torch.float32):
+    def __init__(self, device: str | torch.device | None = None, dtype=torch.float32):
         if device is None:
-            device = get_device_name()
+            device = torch.device(get_device_name(), get_device_id())
         logger.info("Creating PickScore model from %s", _MODEL_PATH)
-        self.device = device
+        self.device = torch.device(device)
         self.dtype = dtype
         self.processor = CLIPProcessor.from_pretrained(_PROCESSOR_PATH)
-        self.model = CLIPModel.from_pretrained(_MODEL_PATH).eval().to(device)
+        self.model = CLIPModel.from_pretrained(_MODEL_PATH).eval().to(self.device)
         self.model = self.model.to(dtype=dtype)
 
     @torch.no_grad()

@@ -32,6 +32,11 @@ class LocalAcceleratorRewardLoopManager(OmniRewardLoopManager):
 
     def _init_reward_loop_workers(self):
         resource_pool = self.accelerator_resource_pool
+        if resource_pool.max_colocate_count < 2:
+            raise ValueError(
+                "Local accelerator reward workers require resource_pool.max_colocate_count >= 2 "
+                "when colocated with ActorRollout"
+            )
         placement_groups = resource_pool.get_placement_groups(device_name=get_device_name())
         bundles = [
             (placement_group, bundle_index)
