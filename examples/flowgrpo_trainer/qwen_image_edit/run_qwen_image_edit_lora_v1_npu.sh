@@ -60,7 +60,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.model.attn_backend='_native_npu' \
     actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
-    +reward.custom_reward_function.use_accelerator=True \
+    reward.custom_reward_function.use_accelerator=True \
     trainer.device=npu \
     trainer.use_v1=True \
     actor_rollout_ref.rollout.cudagraph_capture_sizes="[1,2,4,8,16,32,64,128,256,384,512,640,768,896,1024]" \
