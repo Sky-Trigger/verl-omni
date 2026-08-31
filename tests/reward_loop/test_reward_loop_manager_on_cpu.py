@@ -97,6 +97,15 @@ def test_accelerator_reward_workers_require_enough_bundles():
         manager._init_reward_loop_workers()
 
 
+def test_accelerator_reward_workers_require_colocation_capacity():
+    resource_pool = _FakeResourcePool()
+    resource_pool.max_colocate_count = 1
+    manager = _manager(num_workers=1, resource_pool=resource_pool)
+
+    with pytest.raises(ValueError, match="max_colocate_count >= 2"):
+        manager._init_reward_loop_workers()
+
+
 @pytest.mark.parametrize("use_accelerator", [False, True])
 def test_v1_factory_selects_accelerator_manager_only_when_enabled(monkeypatch, use_accelerator):
     config = SimpleNamespace(
