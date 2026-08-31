@@ -96,6 +96,30 @@ bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh \
     trainer.logger=console
 ```
 
+### Ascend NPU
+
+The NPU recipe uses the synchronous V1 diffusion trainer and assigns each
+local PickScore reward worker to an accelerator bundle from the actor/rollout
+resource pool:
+
+```bash
+WORKSPACE=$PWD \
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=16 \
+bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora_npu.sh
+```
+
+The launcher intentionally adds the opt-in setting with Hydra's `+` syntax:
+
+```text
++reward.custom_reward_function.use_accelerator=True
+```
+
+Its checked-in resource layout uses rollout tensor parallelism 4 and 16 local
+reward workers. Override `ROLLOUT_TP` and `REWARD_WORKERS` together with the
+total NPU count when adapting the recipe to another topology. The model,
+reward function, and parquet inputs use the same environment overrides listed
+below.
+
 By default, the launcher reads:
 
 ```text
