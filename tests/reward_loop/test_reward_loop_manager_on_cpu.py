@@ -80,9 +80,7 @@ def test_accelerator_reward_workers_use_distinct_resource_pool_bundles(monkeypat
 
     assert resource_pool.device_name == "npu"
     assert len(manager.reward_loop_workers) == 3
-    assert [
-        worker.options["scheduling_strategy"] for worker in manager.reward_loop_workers
-    ] == [
+    assert [worker.options["scheduling_strategy"] for worker in manager.reward_loop_workers] == [
         ("pg0", 0),
         ("pg1", 0),
         ("pg0", 1),
