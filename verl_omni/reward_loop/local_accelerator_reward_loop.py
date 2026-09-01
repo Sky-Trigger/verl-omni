@@ -19,6 +19,8 @@ from verl.utils.device import get_device_name
 from .reward_loop import OmniRewardLoopManager
 
 
+# TODO: This is a temporary integration for Qwen-Image-Edit on the synchronous V1 trainer.
+# Other pipelines should not rely on it until a general accelerator reward-worker lifecycle is available.
 class LocalAcceleratorRewardLoopManager(OmniRewardLoopManager):
     """Run a local custom reward function on Ray-assigned accelerators."""
 
