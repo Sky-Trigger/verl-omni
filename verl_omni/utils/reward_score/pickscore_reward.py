@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import gc
 import logging
 import os
 
@@ -49,14 +50,20 @@ def _feature_tensor(features):
 
 
 class _PickScoreInferencer:
-    def __init__(self, device: str | torch.device | None = None, dtype=torch.float32):
+    def __init__(
+        self,
+        device: str | torch.device | None = None,
+        dtype=torch.float32,
+        model_path: str = _MODEL_PATH,
+        processor_path: str = _PROCESSOR_PATH,
+    ):
         if device is None:
             device = torch.device(get_device_name(), get_device_id())
-        logger.info("Creating PickScore model from %s", _MODEL_PATH)
+        logger.info("Creating PickScore model from %s", model_path)
         self.device = torch.device(device)
         self.dtype = dtype
-        self.processor = CLIPProcessor.from_pretrained(_PROCESSOR_PATH)
-        self.model = CLIPModel.from_pretrained(_MODEL_PATH).eval().to(self.device)
+        self.processor = CLIPProcessor.from_pretrained(processor_path)
+        self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device)
         self.model = self.model.to(dtype=dtype)
 
     @torch.no_grad()
@@ -95,6 +102,32 @@ class _PickScoreInferencer:
         scores = scores.diag()
         scores = scores / 26
         return scores
+
+
+class PickScoreNativeScorer:
+    """Lifecycle-friendly synchronous PickScore scorer for native deployments."""
+
+    def __init__(self, model_path: str = _MODEL_PATH, device=None, dtype=torch.float32, processor_path=_PROCESSOR_PATH):
+        self._inferencer = _PickScoreInferencer(
+            device=device,
+            dtype=dtype,
+            model_path=model_path,
+            processor_path=processor_path,
+        )
+
+    def score(self, prompts, images):
+        return self._inferencer.score(list(prompts), list(images))
+
+    def close(self):
+        # Drop the whole inferencer before clearing the allocator: retaining a
+        # local ``model`` variable here would keep its accelerator storage live.
+        if hasattr(self, "_inferencer"):
+            del self._inferencer
+        gc.collect()
+        accelerator = getattr(torch, get_device_name(), None)
+        empty_cache = getattr(accelerator, "empty_cache", None)
+        if callable(empty_cache) and getattr(accelerator, "is_available", lambda: False)():
+            empty_cache()
 
 
 def _to_pil_hwc(image) -> Image.Image:

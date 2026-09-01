@@ -31,40 +31,59 @@ class LocalAcceleratorRewardLoopManager(OmniRewardLoopManager):
         super().__init__(config=config, rm_resource_pool=None)
 
     def _init_reward_loop_workers(self):
-        resource_pool = self.accelerator_resource_pool
-        if resource_pool.max_colocate_count < 2:
-            raise ValueError(
-                "Local accelerator reward workers require resource_pool.max_colocate_count >= 2 "
-                "when colocated with ActorRollout"
-            )
-        placement_groups = resource_pool.get_placement_groups(device_name=get_device_name())
-        bundles = [
-            (placement_group, bundle_index)
-            for bundle_index in range(max(resource_pool.store))
-            for placement_group, local_world_size in zip(placement_groups, resource_pool.store, strict=True)
-            if bundle_index < local_world_size
-        ]
-
-        num_workers = self.config.reward.num_workers
-        if num_workers > len(bundles):
-            raise ValueError(f"reward.num_workers ({num_workers}) exceeds accelerator pool size ({len(bundles)})")
-
-        accelerator_options = get_platform().ray_resource_options(1 / resource_pool.max_colocate_count)
-        self.reward_loop_workers = [
-            self.reward_loop_workers_class.options(
-                **accelerator_options,
-                name=f"reward_loop_worker_{worker_index}",
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=placement_group,
-                    placement_group_bundle_index=bundle_index,
-                ),
-            ).remote(self.config, self.reward_router_address)
-            for worker_index, (placement_group, bundle_index) in enumerate(bundles[:num_workers])
-        ]
+        self.reward_loop_workers = build_accelerator_reward_workers(
+            self,
+            self.accelerator_resource_pool,
+            getattr(getattr(self, "reward_deployment_manager", None), "worker_specs", {}),
+        )
 
 
-def create_v1_reward_loop_manager(config, rm_resource_pool, accelerator_resource_pool):
+def build_accelerator_reward_workers(manager, resource_pool, deployment_specs=None):
+    """Create accelerator-bound workers for native deployment scoring."""
+    if resource_pool is None:
+        raise ValueError("Native reward workers require an accelerator resource pool")
+    if resource_pool.max_colocate_count < 2:
+        raise ValueError(
+            "Local accelerator reward workers require resource_pool.max_colocate_count >= 2 "
+            "when colocated with ActorRollout"
+        )
+    placement_groups = resource_pool.get_placement_groups(device_name=get_device_name())
+    bundles = [
+        (placement_group, bundle_index)
+        for bundle_index in range(max(resource_pool.store))
+        for placement_group, local_world_size in zip(placement_groups, resource_pool.store, strict=True)
+        if bundle_index < local_world_size
+    ]
+
+    num_workers = manager.config.reward.num_workers
+    if num_workers > len(bundles):
+        raise ValueError(f"reward.num_workers ({num_workers}) exceeds accelerator pool size ({len(bundles)})")
+
+    accelerator_options = get_platform().ray_resource_options(1 / resource_pool.max_colocate_count)
+    return [
+        manager.reward_loop_workers_class.options(
+            **accelerator_options,
+            name=f"reward_loop_worker_{worker_index}",
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=placement_group,
+                placement_group_bundle_index=bundle_index,
+            ),
+        ).remote(manager.config, manager.reward_router_address, deployment_specs or {})
+        for worker_index, (placement_group, bundle_index) in enumerate(bundles[:num_workers])
+    ]
+
+
+def create_v1_reward_loop_manager(config, rm_resource_pool, accelerator_resource_pool, engine_resource_pools=None):
     """Select the opt-in accelerator manager for the v1 diffusion trainer."""
-    if config.reward.custom_reward_function.get("use_accelerator", False):
+    deployments = getattr(config.reward, "deployments", None)
+    if config.reward.custom_reward_function.get("use_accelerator", False) and not deployments:
         return LocalAcceleratorRewardLoopManager(config, accelerator_resource_pool)
-    return OmniRewardLoopManager(config=config, rm_resource_pool=rm_resource_pool)
+    kwargs = {
+        "config": config,
+        "rm_resource_pool": rm_resource_pool,
+    }
+    if engine_resource_pools is not None:
+        kwargs["engine_resource_pools"] = engine_resource_pools
+    if deployments:
+        kwargs["accelerator_resource_pool"] = accelerator_resource_pool
+    return OmniRewardLoopManager(**kwargs)

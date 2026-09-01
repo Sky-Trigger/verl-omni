@@ -52,15 +52,18 @@ class MultiVisualRewardManager(VisualRewardManager):
     Each sub-reward function is called with filtered kwargs (based on its signature),
     and the final reward is a weighted sum of all sub-rewards.
 
-    NOTE: All sub-reward functions that need a reward model share the same
-    reward_router_address (single RM instance). Deploying separate RM instances
-    per reward function is not supported. If a future use case requires multiple
-    distinct reward models, this architecture will need to be extended.
+    A sub-reward may optionally set ``deployment``.  Deployment-backed entries
+    are evaluated through the named engine/native deployment supplied by
+    ``set_deployment_context``; entries without one retain the original
+    function-based behavior.
     """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
         # Initialize parent with the placeholder (never actually called)
         super().__init__(config, tokenizer, _multi_reward_placeholder, reward_router_address, reward_model_tokenizer)
+
+        self._deployment_clients = {}
+        self._native_reward_executor = None
 
         reward_functions_cfg = config.reward.reward_functions
         if not reward_functions_cfg:
@@ -68,10 +71,15 @@ class MultiVisualRewardManager(VisualRewardManager):
 
         self._sub_rewards = []
         total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight", "required"}
+        _reserved_keys = {"path", "name", "weight", "required", "deployment"}
         for key, entry in reward_functions_cfg.items():
-            path = entry["path"]
-            name = entry["name"]
+            deployment = entry.get("deployment")
+            path = entry.get("path")
+            name = entry.get("name")
+            if (path is None) != (name is None):
+                raise ValueError(f"Reward function {key!r} must set both path and name")
+            if deployment is None and path is None:
+                raise ValueError(f"Reward function {key!r} requires either deployment or path/name")
             weight = float(entry.get("weight", 1.0))
             required_value = entry.get("required", False)
             if isinstance(required_value, str):
@@ -88,9 +96,9 @@ class MultiVisualRewardManager(VisualRewardManager):
             # Collect extra config fields (beyond path/name/weight) to pass to compute_score
             extra_args = {k: v for k, v in entry.items() if k not in _reserved_keys}
 
-            fn = load_extern_object(path, name)
-            sig = inspect.signature(fn)
-            is_async = inspect.iscoroutinefunction(fn)
+            fn = load_extern_object(path, name) if path is not None else None
+            sig = inspect.signature(fn) if fn is not None else None
+            is_async = inspect.iscoroutinefunction(fn) if fn is not None else True
 
             self._sub_rewards.append(
                 {
@@ -101,15 +109,27 @@ class MultiVisualRewardManager(VisualRewardManager):
                     "sig": sig,
                     "is_async": is_async,
                     "extra_args": extra_args,
+                    "deployment": deployment,
                 }
             )
-            logger.info(f"Loaded sub-reward '{key}': {path}:{name} (weight={weight}, async={is_async})")
+            logger.info(
+                "Loaded sub-reward '%s': %s (weight=%s, async=%s)",
+                key,
+                deployment or f"{path}:{name}",
+                weight,
+                is_async,
+            )
 
         if total_weight <= 0:
             raise ValueError(
                 f"Total weight of reward functions must be > 0, got {total_weight}. "
                 f"Check reward.reward_functions config."
             )
+
+    def set_deployment_context(self, deployment_clients, native_reward_executor) -> None:
+        """Attach per-worker clients for configured engine/native deployments."""
+        self._deployment_clients = deployment_clients or {}
+        self._native_reward_executor = native_reward_executor
 
     async def run_single(self, data: DataProto) -> dict:
         assert len(data) == 1, "Only support single data item"
@@ -158,13 +178,38 @@ class MultiVisualRewardManager(VisualRewardManager):
             sig = sub["sig"]
             is_async = sub["is_async"]
             extra_args = sub["extra_args"]
+            deployment = sub["deployment"]
 
             # Merge per-reward extra config fields into kwargs
             sub_kwargs = {**all_kwargs, **extra_args}
-            filtered_kwargs = _filter_kwargs(sub_kwargs, sig)
+            filtered_kwargs = _filter_kwargs(sub_kwargs, sig) if sig is not None else {}
 
             try:
-                if is_async:
+                if deployment is not None and fn is not None:
+                    try:
+                        client = self._deployment_clients[deployment]
+                    except KeyError as exc:
+                        raise RuntimeError(
+                            f"Reward deployment {deployment!r} does not provide an engine router"
+                        ) from exc
+                    reward_kwargs = getattr(client, "reward_kwargs", None)
+                    if reward_kwargs is None:
+                        raise RuntimeError(f"Reward deployment {deployment!r} cannot be used with a reward function")
+                    filtered_kwargs = _filter_kwargs({**sub_kwargs, **reward_kwargs()}, sig)
+                    if is_async:
+                        result = await fn(**filtered_kwargs)
+                    else:
+                        result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
+                elif deployment is not None:
+                    if deployment in self._deployment_clients:
+                        result = await self._deployment_clients[deployment].score(ground_truth or "", response_visual)
+                    elif self._native_reward_executor is not None:
+                        result = await self._native_reward_executor.score(
+                            deployment, ground_truth or "", response_visual
+                        )
+                    else:
+                        raise RuntimeError(f"Reward deployment {deployment!r} is not available in this worker")
+                elif is_async:
                     result = await fn(**filtered_kwargs)
                 else:
                     result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))

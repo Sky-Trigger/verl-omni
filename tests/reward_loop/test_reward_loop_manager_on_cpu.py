@@ -47,12 +47,13 @@ class _FakeResourcePool:
         return ["pg0", "pg1"]
 
 
-def _manager(num_workers, resource_pool):
+def _manager(num_workers, resource_pool, deployments=None):
     manager = object.__new__(reward_loop_module.LocalAcceleratorRewardLoopManager)
     manager.config = SimpleNamespace(
         reward=SimpleNamespace(
             custom_reward_function={"use_accelerator": True},
             num_workers=num_workers,
+            deployments=deployments or {},
         )
     )
     manager.reward_router_address = "router"
@@ -80,9 +81,7 @@ def test_accelerator_reward_workers_use_distinct_resource_pool_bundles(monkeypat
 
     assert resource_pool.device_name == "npu"
     assert len(manager.reward_loop_workers) == 3
-    assert [
-        worker.options["scheduling_strategy"] for worker in manager.reward_loop_workers
-    ] == [
+    assert [worker.options["scheduling_strategy"] for worker in manager.reward_loop_workers] == [
         ("pg0", 0),
         ("pg1", 0),
         ("pg0", 1),
@@ -126,3 +125,27 @@ def test_v1_factory_selects_accelerator_manager_only_when_enabled(monkeypatch, u
         assert manager == ("accelerator", config, "accelerator_pool")
     else:
         assert manager == ("default", {"config": config, "rm_resource_pool": "rm_pool"})
+
+
+def test_v1_factory_passes_named_deployment_resources(monkeypatch):
+    config = SimpleNamespace(
+        reward=SimpleNamespace(
+            custom_reward_function={"use_accelerator": False},
+            deployments={"pickscore": {"backend": "native"}},
+        )
+    )
+    monkeypatch.setattr(reward_loop_module, "OmniRewardLoopManager", lambda **kwargs: kwargs)
+
+    manager = reward_loop_module.create_v1_reward_loop_manager(
+        config,
+        "rm_pool",
+        "accelerator_pool",
+        engine_resource_pools={"ocr": "ocr_pool"},
+    )
+
+    assert manager == {
+        "config": config,
+        "rm_resource_pool": "rm_pool",
+        "accelerator_resource_pool": "accelerator_pool",
+        "engine_resource_pools": {"ocr": "ocr_pool"},
+    }

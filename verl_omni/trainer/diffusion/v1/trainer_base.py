@@ -45,7 +45,7 @@ from verl.single_controller.ray.base import split_resource_pool
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator
 from verl.utils import tensordict_utils as tu
@@ -58,6 +58,14 @@ from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
+from verl_omni.reward_loop.deployment import (
+    get_engine_deployment_resource_pools,
+    reward_is_enabled,
+    reward_pool_is_separate,
+    reward_role_required,
+    streaming_reward_enabled,
+    uses_deployment_resource_pool,
+)
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
     compute_reward_extra_metrics_diffusion,
@@ -123,7 +131,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.trainer_mode = config.trainer.v1.trainer_mode
         self.parameter_sync_step = config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
         self.use_reference_policy = need_reference_policy(config)
-        self.use_rm = need_reward_model(config)
+        self.use_rm = reward_is_enabled(config)
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
         self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
         validate_distillation_config(config)
@@ -621,15 +629,23 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         global_pool_id = "global_pool"
         resource_pool_spec = {global_pool_id: [self.config.trainer.n_gpus_per_node] * self.config.trainer.nnodes}
 
-        if self.use_rm and self.config.reward.reward_model.enable_resource_pool:
-            reward_pool = [self.config.reward.reward_model.n_gpus_per_node] * self.config.reward.reward_model.nnodes
+        if reward_role_required(self.config) and reward_pool_is_separate(self.config):
+            reward_gpus = self.config.reward.reward_model.n_gpus_per_node
+            reward_nnodes = self.config.reward.reward_model.nnodes
+            reward_pool = [reward_gpus] * reward_nnodes
             resource_pool_spec["reward_pool"] = reward_pool
             self.mapping[Role.RewardModel] = "reward_pool"
         else:
-            if self.use_rm:
+            if reward_role_required(self.config):
                 self.config.reward.reward_model.nnodes = self.config.trainer.nnodes
                 self.config.reward.reward_model.n_gpus_per_node = self.config.trainer.n_gpus_per_node
-            self.mapping[Role.RewardModel] = "global_pool"
+            if reward_role_required(self.config):
+                self.mapping[Role.RewardModel] = "global_pool"
+
+        from verl_omni.reward_loop.deployment import get_engine_deployment_resource_specs
+
+        for name, pool_spec in get_engine_deployment_resource_specs(self.config).items():
+            resource_pool_spec[f"reward_deployment_{name}"] = pool_spec
 
         if self.use_teacher_policy and self.distillation_config.nnodes > 0:
             if self.distillation_config.n_gpus_per_node <= 0:
@@ -716,15 +732,25 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Initialize reward loop, LLM server, and checkpoint engine managers."""
         from verl_omni.reward_loop.local_accelerator_reward_loop import create_v1_reward_loop_manager
 
-        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        resource_pool = (
+            self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+            if reward_role_required(self.config)
+            else None
+        )
+        engine_resource_pools = (
+            get_engine_deployment_resource_pools(self.config, self.resource_pool_manager)
+            if uses_deployment_resource_pool(self.config)
+            else {}
+        )
         self.reward_loop_manager = create_v1_reward_loop_manager(
             config=self.config,
             rm_resource_pool=resource_pool,
             accelerator_resource_pool=actor_rollout_resource_pool,
+            engine_resource_pools=engine_resource_pools,
         )
 
         # Streaming agent reward loop when there is no rm, or the rm has a separate pool.
-        self.enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+        self.enable_agent_reward_loop = streaming_reward_enabled(self.config)
 
         self.llm_server_manager = LLMServerManager.create(
             config=self.config,
