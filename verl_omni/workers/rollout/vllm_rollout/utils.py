@@ -68,6 +68,16 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         """
         self._pending_lora_peft_config = peft_config
 
+    def _move_diffusion_lora_stacks_to_device(self) -> None:
+        """Move unregistered LoRA stacks to the worker device before execution."""
+        # TODO(@NancyFyong): Move this into vLLM-Omni's DiffusionLoRAManager.
+        manager = getattr(self, "lora_manager", None)
+        for module in getattr(manager, "_lora_modules", {}).values():
+            for name in ("lora_a_stacked", "lora_b_stacked"):
+                tensors = getattr(module, name, None)
+                if tensors is not None:
+                    setattr(module, name, tuple(tensor.to(self.device, non_blocking=True) for tensor in tensors))
+
     def _get_standard_weight_model_and_config(self):
         """Return ``(model, model_config)`` for the standard (non-LoRA) AR weight path.
 
@@ -166,6 +176,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 )
             t2 = time.perf_counter()
             self.add_lora(lora_request)
+            if self._get_standard_weight_model_and_config() is None:
+                self._move_diffusion_lora_stacks_to_device()
             t3 = time.perf_counter()
             logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
             logger.debug(
