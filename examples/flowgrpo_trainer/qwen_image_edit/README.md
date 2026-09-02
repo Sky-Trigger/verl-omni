@@ -111,7 +111,7 @@ bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora_v1_npu.s
 The launcher enables accelerator placement for the local reward workers:
 
 ```text
-reward.custom_reward_function.use_accelerator=True
+reward.accelerator_workers.enabled=True
 ```
 
 Its checked-in resource layout uses 16 NPUs, rollout tensor parallelism 4, and

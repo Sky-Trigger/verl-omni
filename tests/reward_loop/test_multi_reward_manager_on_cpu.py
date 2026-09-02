@@ -80,9 +80,8 @@ class _DeploymentClient:
         return {"score": 0.25, "backend": "engine"}
 
 
-class _NativeDeploymentClient:
-    async def score(self, name, prompt, image):
-        assert name == "native_pickscore"
+class _NativeDeploymentExecutor:
+    async def score(self, prompt, image):
         assert prompt == "hello"
         assert image.dtype == torch.uint8
         return {"score": 0.75, "backend": "native"}
@@ -314,7 +313,9 @@ class TestMultiVisualRewardManagerRunSingle:
                 "native": {"deployment": "native_pickscore", "weight": 1.0},
             }
         )
-        manager.set_deployment_context({"ocr_engine": _DeploymentClient()}, _NativeDeploymentClient())
+        manager.set_reward_executors(
+            {"ocr_engine": _DeploymentClient()}, {"native_pickscore": _NativeDeploymentExecutor()}
+        )
 
         result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
 
@@ -336,7 +337,7 @@ class TestMultiVisualRewardManagerRunSingle:
                 },
             }
         )
-        manager.set_deployment_context({"ocr_engine": _EngineRouterClient()}, None)
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClient()}, None)
 
         result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
 

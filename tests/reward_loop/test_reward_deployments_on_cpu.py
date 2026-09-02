@@ -31,9 +31,10 @@ from verl_omni.reward_loop.deployment import (
     NativeRewardDeployment,
     NativeRewardExecutor,
     PickScoreEngineAdapter,
-    RewardDeploymentManager,
-    RewardDeploymentSpec,
+    RewardExecutorSpec,
     _prepare_engine_config,
+    accelerator_workers_enabled,
+    build_engine_reward_executors,
     reward_is_enabled,
     reward_pool_is_separate,
     reward_role_required,
@@ -43,7 +44,6 @@ from verl_omni.reward_loop.deployment import (
 from verl_omni.reward_loop.reward_loop import (
     OmniRewardLoopManager,
     OmniRewardLoopWorker,
-    _build_deployment_clients,
 )
 
 
@@ -58,19 +58,19 @@ def _config(deployments=None):
 def test_engine_deployments_require_parent_pool():
     config = _config(
         {
-            "ocr": {"backend": "verl_engine"},
+            "ocr": {"backend": "engine"},
             "pickscore": {"backend": "engine"},
         }
     )
 
     with pytest.raises(ValueError, match="require a parent resource pool"):
-        RewardDeploymentManager(config)
+        MultiRewardModelManager(config)
 
 
 def test_mixed_engine_and_native_deployments_require_separate_reward_pool():
     config = _config(
         {
-            "ocr": {"backend": "verl_engine", "model_path": "/models/ocr"},
+            "ocr": {"backend": "engine", "model_path": "/models/ocr"},
             "pickscore": {"backend": "native", "adapter": "pickscore"},
         }
     )
@@ -102,7 +102,7 @@ def test_multi_reward_model_manager_splits_parent_pool(monkeypatch):
         ),
         (
             "ocr",
-            {"backend": "verl_engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2},
+            {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2},
         ),
     ]
     base_config = {"rollout": {"tensor_model_parallel_size": 1}}
@@ -134,7 +134,7 @@ def test_multi_reward_model_manager_binds_each_engine_to_its_sub_pool(monkeypatc
                 "rollout": {"tensor_model_parallel_size": 2},
             },
             "ocr": {
-                "backend": "verl_engine",
+                "backend": "engine",
                 "model_path": "/models/ocr",
                 "rollout": {"tensor_model_parallel_size": 2},
             },
@@ -152,10 +152,10 @@ def test_multi_reward_model_manager_binds_each_engine_to_its_sub_pool(monkeypatc
         def __init__(self, name, deployment, base_config, resource_pool, fallback_model):
             del deployment, base_config, fallback_model
             observed.append((name, resource_pool))
-            self._spec = RewardDeploymentSpec(name, "verl_engine", None, f"{name}:8000", {})
+            self._spec = RewardExecutorSpec(name, "engine", None, f"{name}:8000", {})
 
         @property
-        def worker_spec(self):
+        def executor_spec(self):
             return self._spec
 
         def wake_up(self):
@@ -165,12 +165,12 @@ def test_multi_reward_model_manager_binds_each_engine_to_its_sub_pool(monkeypatc
             return None
 
     monkeypatch.setattr(deployment_module, "split_resource_pool", fake_split)
-    monkeypatch.setattr(deployment_module, "VerlEngineRewardDeployment", FakeEngineDeployment)
+    monkeypatch.setattr(deployment_module, "EngineRewardDeployment", FakeEngineDeployment)
 
     manager = MultiRewardModelManager(config, resource_pool=parent_pool)
 
     assert observed == [("pickscore", "pickscore-pool"), ("ocr", "ocr-pool")]
-    assert set(manager.worker_specs) == {"pickscore", "ocr"}
+    assert set(manager.reward_executor_specs) == {"pickscore", "ocr"}
 
 
 def test_engine_deployment_requires_trainer_parent_pool():
@@ -194,6 +194,19 @@ def test_native_only_deployment_does_not_create_a_reward_model_pool():
     assert streaming_reward_enabled(config)
 
 
+def test_accelerator_worker_setting_keeps_the_legacy_alias():
+    config = _config()
+
+    assert not accelerator_workers_enabled(config)
+
+    config.reward.accelerator_workers.enabled = True
+    assert accelerator_workers_enabled(config)
+
+    config.reward.accelerator_workers.enabled = False
+    config.reward.custom_reward_function.use_accelerator = True
+    assert accelerator_workers_enabled(config)
+
+
 def test_engine_deployment_rejects_legacy_per_deployment_pool_switch():
     config = _config({"ocr": {"backend": "engine", "enable_resource_pool": True}})
 
@@ -207,16 +220,16 @@ def test_native_pickscore_adapter_is_selected_by_default():
         OmegaConf.create({"backend": "native", "adapter": "pickscore", "model_path": "/models/pickscore"}),
     )
 
-    assert deployment.worker_spec.native["scorer"] == (
+    assert deployment.executor_spec.executor_config["scorer"] == (
         "verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeScorer"
     )
-    assert deployment.worker_spec.model_path == "/models/pickscore"
+    assert deployment.executor_spec.model_path == "/models/pickscore"
 
 
 def test_engine_config_fills_the_default_rollout_name():
     config = _config()
     engine_config = _prepare_engine_config(
-        OmegaConf.create({"backend": "verl_engine", "model_path": "/models/clip"}),
+        OmegaConf.create({"backend": "engine", "model_path": "/models/clip"}),
         config.reward.reward_model,
     )
 
@@ -226,16 +239,16 @@ def test_engine_config_fills_the_default_rollout_name():
 
 
 def test_pickscore_engine_requires_explicit_logit_scale():
-    spec = RewardDeploymentSpec(
+    spec = RewardExecutorSpec(
         name="pickscore",
-        backend="verl_engine",
+        backend="engine",
         model_path="/models/pickscore",
         router_address="router:8000",
-        native={"adapter": "pickscore"},
+        executor_config={"adapter": "pickscore"},
     )
 
-    with pytest.raises(ValueError, match="requires native.logit_scale"):
-        _build_deployment_clients({"pickscore": spec})
+    with pytest.raises(ValueError, match="requires executor.logit_scale"):
+        build_engine_reward_executors({"pickscore": spec})
 
 
 @pytest.mark.parametrize(
@@ -243,17 +256,17 @@ def test_pickscore_engine_requires_explicit_logit_scale():
     [
         ({}, {"deployment": "missing"}, "unknown deployment"),
         (
-            {"native": {"backend": "native", "native": {"scorer": "unused:Unused"}}},
+            {"native": {"backend": "native", "executor": {"scorer": "unused:Unused"}}},
             {"deployment": "native", "path": "tests.fake.py", "name": "score"},
             "scores directly",
         ),
         (
-            {"engine": {"backend": "verl_engine"}},
+            {"engine": {"backend": "engine"}},
             {"deployment": "engine"},
             "needs path/name",
         ),
         (
-            {"pickscore": {"backend": "verl_engine", "adapter": "pickscore"}},
+            {"pickscore": {"backend": "engine", "adapter": "pickscore"}},
             {"deployment": "pickscore", "path": "tests.fake.py", "name": "score"},
             "scores directly",
         ),
@@ -287,21 +300,21 @@ class _FakeScorer:
 
 @pytest.mark.asyncio
 async def test_native_executor_wakes_scores_and_sleeps(monkeypatch):
-    spec = RewardDeploymentSpec(
+    spec = RewardExecutorSpec(
         name="native",
         backend="native",
         model_path="/models/native",
         router_address=None,
-        native={"scorer": "tests.fake:FakeScorer"},
+        executor_config={"scorer": "tests.fake:FakeScorer"},
     )
-    executor = NativeRewardExecutor({"native": spec})
+    executor = NativeRewardExecutor(spec)
     _FakeScorer.instances.clear()
     monkeypatch.setattr(deployment_module, "_load_native_scorer", lambda _: _FakeScorer)
     monkeypatch.setattr(deployment_module, "get_device_name", lambda: "cpu")
     monkeypatch.setattr(deployment_module, "get_device_id", lambda: 0)
 
-    await executor.wake_up("native")
-    result = await executor.score("native", "prompt", torch.zeros(3, 2, 2, dtype=torch.uint8))
+    await executor.wake_up()
+    result = await executor.score("prompt", torch.zeros(3, 2, 2, dtype=torch.uint8))
     await executor.sleep()
 
     assert result == {"score": 0.75, "pickscore_raw": 0.75}
@@ -309,7 +322,7 @@ async def test_native_executor_wakes_scores_and_sleeps(monkeypatch):
     assert _FakeScorer.instances[0].model_path == "/models/native"
     assert _FakeScorer.instances[0].device == torch.device("cpu", 0)
     assert _FakeScorer.instances[0].closed
-    assert executor._scorers == {}
+    assert executor._scorer is None
 
 
 @pytest.mark.asyncio
@@ -332,20 +345,20 @@ async def test_native_executor_waits_for_inflight_score_before_sleep(monkeypatch
         def close(self):
             self.closed = True
 
-    spec = RewardDeploymentSpec(
+    spec = RewardExecutorSpec(
         name="native",
         backend="native",
         model_path=None,
         router_address=None,
-        native={"scorer": "tests.fake:BlockingScorer"},
+        executor_config={"scorer": "tests.fake:BlockingScorer"},
     )
-    executor = NativeRewardExecutor({"native": spec})
+    executor = NativeRewardExecutor(spec)
     _BlockingScorer.release = False
     monkeypatch.setattr(deployment_module, "_load_native_scorer", lambda _: _BlockingScorer)
     monkeypatch.setattr(deployment_module, "get_device_name", lambda: "cpu")
     monkeypatch.setattr(deployment_module, "get_device_id", lambda: 0)
 
-    score_task = asyncio.create_task(executor.score("native", "prompt", torch.zeros(3, 2, 2, dtype=torch.uint8)))
+    score_task = asyncio.create_task(executor.score("prompt", torch.zeros(3, 2, 2, dtype=torch.uint8)))
     await asyncio.sleep(0.02)
     sleep_task = asyncio.create_task(executor.sleep())
     await asyncio.sleep(0.02)
@@ -353,7 +366,7 @@ async def test_native_executor_waits_for_inflight_score_before_sleep(monkeypatch
     _BlockingScorer.release = True
     assert await score_task == {"score": 0.5, "pickscore_raw": 0.5}
     await sleep_task
-    assert executor._scorers == {}
+    assert executor._scorer is None
 
 
 @pytest.mark.asyncio
@@ -403,7 +416,7 @@ async def test_pickscore_engine_adapter_posts_openai_embedding_payloads(monkeypa
 async def test_streaming_worker_sleeps_native_models_after_one_request(monkeypatch):
     worker = object.__new__(OmniRewardLoopWorker)
     executor = SimpleNamespace(sleep=AsyncMock())
-    worker.native_reward_executor = executor
+    worker.native_reward_executors = {"native": executor}
     worker._native_batch_active = False
 
     async def compute_score(_self, data):
@@ -423,20 +436,21 @@ def test_deployment_manager_rejects_legacy_and_named_models():
     config.reward.reward_model.enable = True
 
     with pytest.raises(ValueError, match="cannot be combined"):
-        RewardDeploymentManager(config)
+        MultiRewardModelManager(config)
 
 
 def test_native_deployment_requires_accelerator_resource_pool():
     manager = object.__new__(OmniRewardLoopManager)
     manager.accelerator_resource_pool = None
-    manager.reward_deployment_manager = SimpleNamespace(
-        worker_specs={
-            "pickscore": RewardDeploymentSpec(
+    manager.config = SimpleNamespace(reward=SimpleNamespace(accelerator_workers={}))
+    manager.multi_reward_model_manager = SimpleNamespace(
+        reward_executor_specs={
+            "pickscore": RewardExecutorSpec(
                 name="pickscore",
                 backend="native",
                 model_path="/models/pickscore",
                 router_address=None,
-                native={"scorer": "tests.fake:FakeScorer"},
+                executor_config={"scorer": "tests.fake:FakeScorer"},
             )
         }
     )

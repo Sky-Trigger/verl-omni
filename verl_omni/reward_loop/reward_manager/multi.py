@@ -54,7 +54,7 @@ class MultiVisualRewardManager(VisualRewardManager):
 
     A sub-reward may optionally set ``deployment``.  Deployment-backed entries
     are evaluated through the named engine/native deployment supplied by
-    ``set_deployment_context``; entries without one retain the original
+    ``set_reward_executors``; entries without one retain the original
     function-based behavior.
     """
 
@@ -62,8 +62,8 @@ class MultiVisualRewardManager(VisualRewardManager):
         # Initialize parent with the placeholder (never actually called)
         super().__init__(config, tokenizer, _multi_reward_placeholder, reward_router_address, reward_model_tokenizer)
 
-        self._deployment_clients = {}
-        self._native_reward_executor = None
+        self._engine_reward_executors = {}
+        self._native_reward_executors = {}
 
         reward_functions_cfg = config.reward.reward_functions
         if not reward_functions_cfg:
@@ -126,10 +126,10 @@ class MultiVisualRewardManager(VisualRewardManager):
                 f"Check reward.reward_functions config."
             )
 
-    def set_deployment_context(self, deployment_clients, native_reward_executor) -> None:
-        """Attach per-worker clients for configured engine/native deployments."""
-        self._deployment_clients = deployment_clients or {}
-        self._native_reward_executor = native_reward_executor
+    def set_reward_executors(self, engine_reward_executors, native_reward_executors) -> None:
+        """Attach per-worker executors for configured engine/native deployments."""
+        self._engine_reward_executors = engine_reward_executors or {}
+        self._native_reward_executors = native_reward_executors or {}
 
     async def run_single(self, data: DataProto) -> dict:
         assert len(data) == 1, "Only support single data item"
@@ -187,12 +187,12 @@ class MultiVisualRewardManager(VisualRewardManager):
             try:
                 if deployment is not None and fn is not None:
                     try:
-                        client = self._deployment_clients[deployment]
+                        executor = self._engine_reward_executors[deployment]
                     except KeyError as exc:
                         raise RuntimeError(
                             f"Reward deployment {deployment!r} does not provide an engine router"
                         ) from exc
-                    reward_kwargs = getattr(client, "reward_kwargs", None)
+                    reward_kwargs = getattr(executor, "reward_kwargs", None)
                     if reward_kwargs is None:
                         raise RuntimeError(f"Reward deployment {deployment!r} cannot be used with a reward function")
                     filtered_kwargs = _filter_kwargs({**sub_kwargs, **reward_kwargs()}, sig)
@@ -201,11 +201,13 @@ class MultiVisualRewardManager(VisualRewardManager):
                     else:
                         result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
                 elif deployment is not None:
-                    if deployment in self._deployment_clients:
-                        result = await self._deployment_clients[deployment].score(ground_truth or "", response_visual)
-                    elif self._native_reward_executor is not None:
-                        result = await self._native_reward_executor.score(
-                            deployment, ground_truth or "", response_visual
+                    if deployment in self._engine_reward_executors:
+                        result = await self._engine_reward_executors[deployment].score(
+                            ground_truth or "", response_visual
+                        )
+                    elif deployment in self._native_reward_executors:
+                        result = await self._native_reward_executors[deployment].score(
+                            ground_truth or "", response_visual
                         )
                     else:
                         raise RuntimeError(f"Reward deployment {deployment!r} is not available in this worker")

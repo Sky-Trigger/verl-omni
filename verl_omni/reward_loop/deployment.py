@@ -41,7 +41,7 @@ from verl.utils.device import get_device_id, get_device_name
 
 logger = logging.getLogger(__name__)
 
-_ENGINE_BACKENDS = {"verl_engine", "engine"}
+_ENGINE_BACKENDS = {"engine"}
 _NATIVE_BACKENDS = {"native"}
 
 
@@ -96,7 +96,7 @@ def validate_reward_deployment_terms(config) -> None:
         deployment = deployments[deployment_name]
         has_function = term.get("path") is not None
         backend = deployment.get("backend")
-        adapter = deployment.get("adapter") or _coerce_mapping(deployment.get("native")).get("adapter")
+        adapter = deployment.get("adapter") or _coerce_mapping(deployment.get("executor")).get("adapter")
         if backend in _NATIVE_BACKENDS and has_function:
             raise ValueError(
                 f"Native reward deployment {deployment_name!r} scores directly; "
@@ -133,6 +133,13 @@ def streaming_reward_enabled(config) -> bool:
         # streaming workers have no controller callback at request time.
         return False
     return has_native_reward_deployments(config) or bool(config.reward.reward_model.get("enable_resource_pool", False))
+
+
+def accelerator_workers_enabled(config) -> bool:
+    """Whether custom reward workers should use the accelerator placement helper."""
+    accelerator_workers = config.reward.get("accelerator_workers", {}) or {}
+    legacy_custom = config.reward.get("custom_reward_function", {}) or {}
+    return bool(accelerator_workers.get("enabled", False) or legacy_custom.get("use_accelerator", False))
 
 
 def _coerce_mapping(value) -> dict[str, Any]:
@@ -175,7 +182,7 @@ def _prepare_engine_config(deployment, base_config, fallback_model=None):
         OmegaConf.create(_coerce_mapping(base_config)),
         OmegaConf.create(_coerce_mapping(deployment)),
     )
-    for key in ("backend", "native", "name", "enable_resource_pool", "adapter"):
+    for key in ("backend", "executor", "name", "enable_resource_pool", "adapter"):
         if key in config:
             del config[key]
     config.enable = True
@@ -191,20 +198,20 @@ def _prepare_engine_config(deployment, base_config, fallback_model=None):
 
 
 @dataclass(frozen=True)
-class RewardDeploymentSpec:
+class RewardExecutorSpec:
     """Static metadata shared with every reward-loop worker."""
 
     name: str
     backend: str
     model_path: str | None
     router_address: str | None
-    native: dict[str, Any]
+    executor_config: dict[str, Any]
 
 
 class RewardDeployment(ABC):
     """A model deployment with an explicit wake/score/sleep lifecycle."""
 
-    def __init__(self, spec: RewardDeploymentSpec):
+    def __init__(self, spec: RewardExecutorSpec):
         self.spec = spec
 
     @property
@@ -212,7 +219,7 @@ class RewardDeployment(ABC):
         return self.spec.name
 
     @property
-    def worker_spec(self) -> RewardDeploymentSpec:
+    def executor_spec(self) -> RewardExecutorSpec:
         return self.spec
 
     @abstractmethod
@@ -224,22 +231,22 @@ class RewardDeployment(ABC):
         raise NotImplementedError
 
 
-class VerlEngineRewardDeployment(RewardDeployment):
+class EngineRewardDeployment(RewardDeployment):
     """Engine deployment owned by the existing ``verl.RewardModelManager``."""
 
     def __init__(self, name: str, deployment, base_config, resource_pool, fallback_model=None):
         config = _prepare_engine_config(deployment, base_config, fallback_model)
-        native = _coerce_mapping(deployment.get("native"))
+        executor_config = _coerce_mapping(deployment.get("executor"))
         self.reward_model_manager = RewardModelManager(config, resource_pool)
         super().__init__(
-            RewardDeploymentSpec(
+            RewardExecutorSpec(
                 name=name,
-                backend="verl_engine",
+                backend="engine",
                 model_path=config.model_path,
                 router_address=self.reward_model_manager.get_router_address(),
-                native={
-                    **native,
-                    "adapter": deployment.get("adapter") or native.get("adapter"),
+                executor_config={
+                    **executor_config,
+                    "adapter": deployment.get("adapter") or executor_config.get("adapter"),
                 },
             )
         )
@@ -255,21 +262,21 @@ class NativeRewardDeployment(RewardDeployment):
     """Native model state that is owned by every accelerator reward worker."""
 
     def __init__(self, name: str, deployment):
-        native = _coerce_mapping(deployment.get("native"))
-        scorer = native.get("scorer")
-        adapter = deployment.get("adapter") or native.get("adapter")
+        executor_config = _coerce_mapping(deployment.get("executor"))
+        scorer = executor_config.get("scorer")
+        adapter = deployment.get("adapter") or executor_config.get("adapter")
         if scorer is None and adapter == "pickscore":
             scorer = "verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeScorer"
-            native["scorer"] = scorer
+            executor_config["scorer"] = scorer
         if not scorer:
-            raise ValueError(f"Native reward deployment {name!r} requires native.scorer")
+            raise ValueError(f"Native reward deployment {name!r} requires executor.scorer")
         super().__init__(
-            RewardDeploymentSpec(
+            RewardExecutorSpec(
                 name=name,
                 backend="native",
                 model_path=deployment.get("model_path"),
                 router_address=None,
-                native=native,
+                executor_config=executor_config,
             )
         )
 
@@ -316,7 +323,7 @@ class MultiRewardModelManager:
         for name, deployment in entries.items():
             backend = deployment.get("backend")
             if is_engine_backend(backend):
-                self.deployments[name] = VerlEngineRewardDeployment(
+                self.deployments[name] = EngineRewardDeployment(
                     name, deployment, base_config, engine_pools.get(name), fallback_model
                 )
             elif backend in _NATIVE_BACKENDS:
@@ -384,16 +391,16 @@ class MultiRewardModelManager:
         return {name: pool for (name, _), pool in zip(engine_entries, sub_pools[: len(engine_entries)], strict=True)}
 
     @property
-    def worker_specs(self) -> dict[str, RewardDeploymentSpec]:
-        return {name: deployment.worker_spec for name, deployment in self.deployments.items()}
+    def reward_executor_specs(self) -> dict[str, RewardExecutorSpec]:
+        return {name: deployment.executor_spec for name, deployment in self.deployments.items()}
 
     @property
     def has_engine_deployment(self) -> bool:
-        return any(isinstance(deployment, VerlEngineRewardDeployment) for deployment in self.deployments.values())
+        return any(isinstance(deployment, EngineRewardDeployment) for deployment in self.deployments.values())
 
-    def get_worker_spec(self, name: str) -> RewardDeploymentSpec:
+    def get_reward_executor_spec(self, name: str) -> RewardExecutorSpec:
         try:
-            return self.worker_specs[name]
+            return self.reward_executor_specs[name]
         except KeyError as exc:
             raise ValueError(f"Unknown reward deployment {name!r}") from exc
 
@@ -411,10 +418,6 @@ class MultiRewardModelManager:
                 logger.exception("Failed to sleep reward deployment %s", deployment.name)
         if errors:
             raise errors[0]
-
-
-# Backward-compatible name for downstream imports from the initial PR.
-RewardDeploymentManager = MultiRewardModelManager
 
 
 def _to_pil_image(image) -> Image.Image:
@@ -478,13 +481,13 @@ class PickScoreEngineAdapter:
         return {"score": raw_score, "pickscore_raw": raw_score}
 
 
-class RouterEngineRewardClient:
-    """Expose one named engine router to an existing reward function.
+class EngineRouterAdapter:
+    """Adapt one named engine router to an existing reward function.
 
     Many engine-backed rewards already have their task-specific logic in a
     regular reward function (for example, OCR calls chat completions and then
-    applies its own string metric).  This lightweight client lets that function
-    select a named deployment instead of reading the former global router.
+    applies its own string metric). This adapter gives that function the
+    selected deployment's router arguments instead of the former global router.
     """
 
     def __init__(self, router_address: str, model_path: str):
@@ -498,12 +501,59 @@ class RouterEngineRewardClient:
         }
 
 
+class EngineRewardExecutor:
+    """Worker-side executor for one engine-backed reward deployment.
+
+    The deployment/controller side owns router replicas and lifecycle through
+    ``RewardModelManager``.  This executor owns only the worker-side request
+    contract: generic reward functions receive router kwargs, while a semantic
+    adapter such as PickScore can turn endpoint responses into a score.
+    """
+
+    def __init__(self, spec: RewardExecutorSpec):
+        self.spec = spec
+        adapter = spec.executor_config.get("adapter")
+        if adapter == "pickscore":
+            if "logit_scale" not in spec.executor_config:
+                raise ValueError(
+                    f"PickScore engine deployment {spec.name!r} requires executor.logit_scale; "
+                    "vLLM does not load the checkpoint logit_scale."
+                )
+            self._adapter = PickScoreEngineAdapter(
+                router_address=spec.router_address,
+                model_path=spec.model_path,
+                logit_scale=float(spec.executor_config["logit_scale"]),
+                score_divisor=float(spec.executor_config.get("score_divisor", 26.0)),
+            )
+        elif adapter is None:
+            self._adapter = EngineRouterAdapter(
+                router_address=spec.router_address,
+                model_path=spec.model_path,
+            )
+        else:
+            raise ValueError(f"Unsupported engine reward adapter {adapter!r} for deployment {spec.name!r}")
+
+    def reward_kwargs(self) -> dict[str, str]:
+        reward_kwargs = getattr(self._adapter, "reward_kwargs", None)
+        if reward_kwargs is None:
+            raise RuntimeError(f"Engine deployment {self.spec.name!r} does not accept a reward function")
+        return reward_kwargs()
+
+    async def score(self, prompt: str, image) -> dict[str, float]:
+        score = getattr(self._adapter, "score", None)
+        if score is None:
+            raise RuntimeError(f"Engine deployment {self.spec.name!r} requires a reward function")
+        return await score(prompt, image)
+
+
 class NativeRewardExecutor:
     """Worker-local native-model owner with safe wake/sleep semantics."""
 
-    def __init__(self, specs: dict[str, RewardDeploymentSpec]):
-        self.specs = specs
-        self._scorers: dict[str, Any] = {}
+    def __init__(self, spec: RewardExecutorSpec):
+        if spec.backend != "native":
+            raise ValueError(f"NativeRewardExecutor requires a native spec, got {spec.backend!r}")
+        self.spec = spec
+        self._scorer: Any | None = None
         self._inflight = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -514,33 +564,32 @@ class NativeRewardExecutor:
         # counted by ``sleep``.
         self._score_lock = asyncio.Lock()
 
-    async def wake_up(self, name: str) -> None:
+    async def wake_up(self) -> None:
         async with self._lock:
-            await self._wake_up_locked(name)
+            await self._wake_up_locked()
 
-    async def _wake_up_locked(self, name: str) -> None:
-        """Load one scorer while the lifecycle lock is held."""
-        spec = self.specs[name]
-        if spec.backend != "native" or name in self._scorers:
+    async def _wake_up_locked(self) -> None:
+        """Load this deployment's scorer while the lifecycle lock is held."""
+        if self._scorer is not None:
             return
-        scorer_cls = _load_native_scorer(spec.native["scorer"])
-        kwargs = dict(spec.native.get("kwargs", {}))
-        if spec.model_path is not None:
-            kwargs.setdefault("model_path", spec.model_path)
+        scorer_cls = _load_native_scorer(self.spec.executor_config["scorer"])
+        kwargs = dict(self.spec.executor_config.get("kwargs", {}))
+        if self.spec.model_path is not None:
+            kwargs.setdefault("model_path", self.spec.model_path)
         # Ray normally rewrites the visible-device environment for an actor.
         # Its accelerator ID is therefore a physical allocation ID, whereas
         # torch needs the process-local current index (often ``0``). Use
         # verl's platform helper rather than feeding the physical ID to
         # ``torch.device``.
         kwargs.setdefault("device", torch.device(get_device_name(), get_device_id()))
-        self._scorers[name] = scorer_cls(**kwargs)
+        self._scorer = scorer_cls(**kwargs)
 
-    async def score(self, name: str, prompt: str, image) -> dict:
+    async def score(self, prompt: str, image) -> dict:
         async with self._lock:
             self._inflight += 1
             self._idle.clear()
             try:
-                await self._wake_up_locked(name)
+                await self._wake_up_locked()
             except BaseException:
                 self._inflight -= 1
                 if self._inflight == 0:
@@ -548,7 +597,7 @@ class NativeRewardExecutor:
                 raise
         try:
             async with self._score_lock:
-                scorer = self._scorers[name]
+                scorer = self._scorer
                 pil_image = _to_pil_image(image)
                 score_fn = getattr(scorer, "score", None)
                 if score_fn is None:
@@ -570,7 +619,7 @@ class NativeRewardExecutor:
                 if self._inflight == 0:
                     self._idle.set()
 
-    async def sleep(self, name: str | None = None) -> None:
+    async def sleep(self) -> None:
         while True:
             await self._idle.wait()
             async with self._lock:
@@ -579,11 +628,8 @@ class NativeRewardExecutor:
                 # and scorer removal one atomic lifecycle transition.
                 if self._inflight:
                     continue
-                names = [name] if name is not None else list(self._scorers)
-                for scorer_name in names:
-                    scorer = self._scorers.pop(scorer_name, None)
-                    if scorer is None:
-                        continue
+                scorer, self._scorer = self._scorer, None
+                if scorer is not None:
                     close = getattr(scorer, "close", None)
                     if close is not None:
                         result = await asyncio.get_running_loop().run_in_executor(None, close)
@@ -594,6 +640,11 @@ class NativeRewardExecutor:
                 return
 
 
-def build_native_executor(specs: dict[str, RewardDeploymentSpec]) -> NativeRewardExecutor:
-    """Factory kept separate to make worker construction easy to test."""
-    return NativeRewardExecutor(specs)
+def build_engine_reward_executors(specs: dict[str, RewardExecutorSpec]) -> dict[str, EngineRewardExecutor]:
+    """Construct per-worker engine executors for named engine deployments."""
+    return {name: EngineRewardExecutor(spec) for name, spec in specs.items() if is_engine_backend(spec.backend)}
+
+
+def build_native_reward_executors(specs: dict[str, RewardExecutorSpec]) -> dict[str, NativeRewardExecutor]:
+    """Construct one worker-local executor for each named native deployment."""
+    return {name: NativeRewardExecutor(spec) for name, spec in specs.items() if spec.backend == "native"}
