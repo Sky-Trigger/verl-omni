@@ -25,11 +25,7 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
-from verl_omni.reward_loop.deployment import (
-    get_engine_deployment_resource_specs,
-    reward_pool_is_separate,
-    reward_role_required,
-)
+from verl_omni.reward_loop.deployment import reward_pool_is_separate, reward_role_required
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
@@ -210,9 +206,6 @@ class TaskRunner:
         elif reward_role_required(config):
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
-
-        for name, pool_spec in get_engine_deployment_resource_specs(config).items():
-            resource_pool_spec[f"reward_deployment_{name}"] = pool_spec
 
         distillation_config = config.get("distillation")
         if is_distillation_enabled(distillation_config) and distillation_config.nnodes > 0:

@@ -29,10 +29,11 @@ custom_reward_function:
 reward_functions: {}
 
 # Named reward-model deployments. A reward function may reference one entry
-# with ``deployment: <key>``. Backends are ``verl_engine`` (existing verl
-# RewardModelManager lifecycle) and ``native`` (verl-omni worker-local model).
-# Every ``verl_engine`` deployment with ``enable_resource_pool: true`` gets an
-# independent Ray pool, so independently configured models never share GPUs.
+# with ``deployment: <key>``. Backends are ``engine`` (vLLM/vLLM-Omni through
+# the existing verl RewardModelManager; ``verl_engine`` remains a compatibility
+# alias) and ``native`` (verl-omni worker-local model). Trainer selects one
+# parent global_pool or reward_pool through reward_model.enable_resource_pool;
+# MultiRewardModelManager splits that parent pool among engine deployments.
 # Native PickScore example:
 #
 # deployments:
@@ -44,8 +45,7 @@ reward_functions: {}
 # Engine PickScore example (requires a vLLM pooling endpoint compatible with
 # this checkpoint; verify embedding parity before using it for training):
 #   pickscore_engine:
-#     backend: verl_engine
-#     enable_resource_pool: true
+#     backend: engine
 #     n_gpus_per_node: 1
 #     nnodes: 1
 #     model_path: yuvalkirstain/PickScore_v1
@@ -80,8 +80,9 @@ reward_manager:
 reward_model:
   enable: False
 
-  # Whether to deploy the model to a separate resource pool.
-  # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
+  # Select the parent pool for legacy reward_model and named engine deployments.
+  # If true, use a dedicated reward_pool; otherwise, use global_pool.
+  # MultiRewardModelManager splits the selected parent pool per deployment.
   enable_resource_pool: False
   n_gpus_per_node: 8
   nnodes: 0

@@ -73,7 +73,7 @@ def build_accelerator_reward_workers(manager, resource_pool, deployment_specs=No
     ]
 
 
-def create_v1_reward_loop_manager(config, rm_resource_pool, accelerator_resource_pool, engine_resource_pools=None):
+def create_v1_reward_loop_manager(config, rm_resource_pool, accelerator_resource_pool):
     """Select the opt-in accelerator manager for the v1 diffusion trainer."""
     deployments = getattr(config.reward, "deployments", None)
     if config.reward.custom_reward_function.get("use_accelerator", False) and not deployments:
@@ -82,8 +82,6 @@ def create_v1_reward_loop_manager(config, rm_resource_pool, accelerator_resource
         "config": config,
         "rm_resource_pool": rm_resource_pool,
     }
-    if engine_resource_pools is not None:
-        kwargs["engine_resource_pools"] = engine_resource_pools
     if deployments:
         kwargs["accelerator_resource_pool"] = accelerator_resource_pool
     return OmniRewardLoopManager(**kwargs)

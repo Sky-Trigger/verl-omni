@@ -127,7 +127,7 @@ def test_v1_factory_selects_accelerator_manager_only_when_enabled(monkeypatch, u
         assert manager == ("default", {"config": config, "rm_resource_pool": "rm_pool"})
 
 
-def test_v1_factory_passes_named_deployment_resources(monkeypatch):
+def test_v1_factory_passes_accelerator_pool_for_named_deployments(monkeypatch):
     config = SimpleNamespace(
         reward=SimpleNamespace(
             custom_reward_function={"use_accelerator": False},
@@ -136,16 +136,10 @@ def test_v1_factory_passes_named_deployment_resources(monkeypatch):
     )
     monkeypatch.setattr(reward_loop_module, "OmniRewardLoopManager", lambda **kwargs: kwargs)
 
-    manager = reward_loop_module.create_v1_reward_loop_manager(
-        config,
-        "rm_pool",
-        "accelerator_pool",
-        engine_resource_pools={"ocr": "ocr_pool"},
-    )
+    manager = reward_loop_module.create_v1_reward_loop_manager(config, "rm_pool", "accelerator_pool")
 
     assert manager == {
         "config": config,
         "rm_resource_pool": "rm_pool",
         "accelerator_resource_pool": "accelerator_pool",
-        "engine_resource_pools": {"ocr": "ocr_pool"},
     }

@@ -13,10 +13,9 @@
 # limitations under the License.
 """Managed reward-model deployments used by :mod:`verl_omni.reward_loop`.
 
-The upstream ``RewardModelManager`` remains the owner of a regular verl reward
-model.  This module puts that manager, arbitrary engine endpoints, and local
-native models behind the same lifecycle boundary so a visual reward can select
-the deployment it needs without making ``RewardLoopWorker`` own all models.
+The upstream ``RewardModelManager`` remains the owner of one engine-backed
+reward model. ``MultiRewardModelManager`` owns the parent resource pool and
+splits it between those single-model managers; native models remain worker-local.
 """
 
 from __future__ import annotations
@@ -37,13 +36,13 @@ import torch
 from omegaconf import OmegaConf
 from PIL import Image
 from verl.experimental.reward_loop.reward_model import RewardModelManager
+from verl.single_controller.ray.base import split_resource_pool
 from verl.utils.device import get_device_id, get_device_name
 
 logger = logging.getLogger(__name__)
 
 _ENGINE_BACKENDS = {"verl_engine", "engine"}
 _NATIVE_BACKENDS = {"native"}
-_ENGINE_RESOURCE_POOL_PREFIX = "reward_deployment_"
 
 
 def has_reward_deployments(config) -> bool:
@@ -116,13 +115,8 @@ def validate_reward_deployment_terms(config) -> None:
 
 
 def reward_role_required(config) -> bool:
-    """Whether the legacy reward model needs the ``Role.RewardModel`` pool.
-
-    Named engine deployments own their resource pools directly.  They are not
-    a worker role, so registering them through the single legacy role would
-    make two independent deployments share one set of GPUs.
-    """
-    return bool(config.reward.reward_model.get("enable", False))
+    """Whether the reward loop needs the trainer-selected parent pool."""
+    return bool(config.reward.reward_model.get("enable", False) or has_engine_reward_deployments(config))
 
 
 def reward_pool_is_separate(config) -> bool:
@@ -139,73 +133,6 @@ def streaming_reward_enabled(config) -> bool:
         # streaming workers have no controller callback at request time.
         return False
     return has_native_reward_deployments(config) or bool(config.reward.reward_model.get("enable_resource_pool", False))
-
-
-def engine_resource_pool_name(deployment_name: str) -> str:
-    """Return the dedicated Ray resource-pool name for one deployment."""
-    return f"{_ENGINE_RESOURCE_POOL_PREFIX}{deployment_name}"
-
-
-def get_engine_deployment_resource_specs(config) -> dict[str, list[int]]:
-    """Return one dedicated Ray-pool specification for each standalone engine.
-
-    ``RewardModelManager`` starts a replica group immediately.  Giving two
-    differently named deployments the legacy ``reward_pool`` would therefore
-    start both groups on the same GPUs.  Keep their pools independent instead.
-    """
-    entries = config.reward.get("deployments", {}) or {}
-    colocated = [
-        name
-        for name, deployment in entries.items()
-        if is_engine_backend(deployment.get("backend")) and not deployment.get("enable_resource_pool", False)
-    ]
-    if len(colocated) > 1:
-        raise ValueError(
-            "At most one engine reward deployment may be colocated with actor/rollout; "
-            "set enable_resource_pool=true for the other deployments."
-        )
-    if colocated and has_native_reward_deployments(config):
-        raise ValueError(
-            "A colocated engine reward deployment cannot be combined with native reward deployments; "
-            "set enable_resource_pool=true for the engine deployment."
-        )
-
-    specs = {}
-    for name, deployment in entries.items():
-        if not is_engine_backend(deployment.get("backend")) or not deployment.get("enable_resource_pool", False):
-            continue
-        gpus = int(deployment.get("n_gpus_per_node", config.reward.reward_model.n_gpus_per_node))
-        nnodes = int(deployment.get("nnodes", config.reward.reward_model.nnodes))
-        if gpus <= 0:
-            raise ValueError(f"Engine reward deployment {name!r} requires n_gpus_per_node > 0")
-        if nnodes <= 0:
-            raise ValueError(f"Engine reward deployment {name!r} requires nnodes > 0")
-        specs[name] = [gpus] * nnodes
-    return specs
-
-
-def get_engine_deployment_resource_pools(config, resource_pool_manager) -> dict[str, Any]:
-    """Resolve standalone deployment names to their dedicated Ray pools."""
-    return {
-        name: resource_pool_manager.resource_pool_dict[engine_resource_pool_name(name)]
-        for name in get_engine_deployment_resource_specs(config)
-    }
-
-
-def uses_deployment_resource_pool(config) -> bool:
-    """Return whether an engine deployment needs a separate Ray pool."""
-    for deployment in (config.reward.get("deployments") or {}).values():
-        if is_engine_backend(deployment.get("backend")) and deployment.get("enable_resource_pool", False):
-            return True
-    return False
-
-
-def uses_colocated_deployment(config) -> bool:
-    """Return whether an engine deployment shares the actor/rollout pool."""
-    for deployment in (config.reward.get("deployments") or {}).values():
-        if is_engine_backend(deployment.get("backend")) and not deployment.get("enable_resource_pool", False):
-            return True
-    return False
 
 
 def _coerce_mapping(value) -> dict[str, Any]:
@@ -353,36 +280,44 @@ class NativeRewardDeployment(RewardDeployment):
         return None
 
 
-class RewardDeploymentManager:
+class MultiRewardModelManager:
     """Create and lifecycle-manage all configured reward deployments.
 
-    The manager lives in the trainer/controller process.  Engine deployments
-    own their replicas through ``RewardModelManager``; native deployments are
-    represented here and instantiated lazily by ``NativeRewardExecutor`` in
-    the Ray reward-loop worker that owns the assigned accelerator.
+    The manager lives in the trainer/controller process. It receives one
+    trainer-selected parent pool and splits it between engine deployments
+    before constructing one upstream ``RewardModelManager`` per deployment.
+    Native deployments are represented here and instantiated lazily by
+    ``NativeRewardExecutor`` in the reward-loop worker that owns an accelerator.
     """
 
-    def __init__(self, config, engine_resource_pool=None, engine_resource_pools=None):
+    def __init__(self, config, resource_pool=None):
         if has_reward_deployments(config) and config.reward.reward_model.get("enable", False):
             raise ValueError("reward.reward_model.enable cannot be combined with reward.deployments")
-        get_engine_deployment_resource_specs(config)
         self.config = config
-        self.engine_resource_pools = engine_resource_pools or {}
+        self.resource_pool = resource_pool
         self.deployments: dict[str, RewardDeployment] = {}
         entries = config.reward.get("deployments", {}) or {}
         fallback_model = config.reward.reward_model.get("model_path")
         base_config = config.reward.reward_model
+        engine_entries = [
+            (name, deployment) for name, deployment in entries.items() if is_engine_backend(deployment.get("backend"))
+        ]
+        if engine_entries and has_native_reward_deployments(config) and not reward_pool_is_separate(config):
+            raise ValueError(
+                "Mixed engine and native reward deployments require reward.reward_model.enable_resource_pool=true"
+            )
+        for name, deployment in engine_entries:
+            if "enable_resource_pool" in deployment:
+                raise ValueError(
+                    f"Engine reward deployment {name!r} must not set enable_resource_pool; "
+                    "select the parent pool with reward.reward_model.enable_resource_pool instead"
+                )
+        engine_pools = self._split_engine_resource_pool(engine_entries, base_config)
         for name, deployment in entries.items():
             backend = deployment.get("backend")
             if is_engine_backend(backend):
-                if deployment.get("enable_resource_pool", False):
-                    resource_pool = self.engine_resource_pools.get(name)
-                    if resource_pool is None:
-                        raise ValueError(f"Missing resource pool for engine reward deployment {name!r}")
-                else:
-                    resource_pool = engine_resource_pool
                 self.deployments[name] = VerlEngineRewardDeployment(
-                    name, deployment, base_config, resource_pool, fallback_model
+                    name, deployment, base_config, engine_pools.get(name), fallback_model
                 )
             elif backend in _NATIVE_BACKENDS:
                 self.deployments[name] = NativeRewardDeployment(name, deployment)
@@ -392,17 +327,65 @@ class RewardDeploymentManager:
                     f"Reward deployment {name!r} has unsupported backend {backend!r}; expected one of {supported}"
                 )
 
+    @staticmethod
+    def _rollout_world_size(deployment, base_config) -> int:
+        rollout = _coerce_mapping(deployment.get("rollout"))
+        base_rollout = _coerce_mapping(base_config.get("rollout"))
+        merged = {**base_rollout, **rollout}
+        values = [
+            int(merged.get("tensor_model_parallel_size", 1)),
+            int(merged.get("data_parallel_size", 1)),
+            int(merged.get("pipeline_model_parallel_size", 1)),
+        ]
+        if any(value <= 0 for value in values):
+            raise ValueError("Engine reward rollout parallel sizes must be positive")
+        replicas = int(deployment.get("replicas", 1))
+        if replicas <= 0:
+            raise ValueError("Engine reward deployment replicas must be positive")
+        return replicas * values[0] * values[1] * values[2]
+
+    def _split_engine_resource_pool(self, engine_entries, base_config) -> dict[str, Any]:
+        if not engine_entries:
+            return {}
+        if self.resource_pool is None:
+            raise ValueError("Engine reward deployments require a trainer-selected parent resource pool")
+
+        requested_sizes = []
+        for name, deployment in engine_entries:
+            explicit_gpus = deployment.get("n_gpus_per_node")
+            explicit_nodes = deployment.get("nnodes")
+            if (explicit_gpus is None) != (explicit_nodes is None):
+                raise ValueError(f"Engine reward deployment {name!r} must set both n_gpus_per_node and nnodes")
+            if explicit_gpus is not None:
+                requested = int(explicit_gpus) * int(explicit_nodes)
+            else:
+                requested = self._rollout_world_size(deployment, base_config)
+            if requested <= 0:
+                raise ValueError(f"Engine reward deployment {name!r} resource allocation must be positive")
+            rollout_world_size = self._rollout_world_size(deployment, base_config)
+            if requested < rollout_world_size or requested % rollout_world_size:
+                raise ValueError(
+                    f"Engine reward deployment {name!r} allocation ({requested}) must be a multiple of "
+                    f"rollout world size ({rollout_world_size})"
+                )
+            requested_sizes.append(requested)
+
+        parent_world_size = self.resource_pool.world_size
+        requested_total = sum(requested_sizes)
+        if requested_total > parent_world_size:
+            raise ValueError(
+                f"Engine reward deployments request {requested_total} devices, "
+                f"but the parent reward pool has only {parent_world_size}"
+            )
+        split_sizes = requested_sizes
+        if requested_total < parent_world_size:
+            split_sizes = [*split_sizes, parent_world_size - requested_total]
+        sub_pools = split_resource_pool(self.resource_pool, split_sizes)
+        return {name: pool for (name, _), pool in zip(engine_entries, sub_pools[: len(engine_entries)], strict=True)}
+
     @property
     def worker_specs(self) -> dict[str, RewardDeploymentSpec]:
         return {name: deployment.worker_spec for name, deployment in self.deployments.items()}
-
-    @property
-    def has_colocated_engine_deployment(self) -> bool:
-        for name, deployment in (self.config.reward.get("deployments") or {}).items():
-            if name in self.deployments and is_engine_backend(deployment.get("backend")):
-                if not deployment.get("enable_resource_pool", False):
-                    return True
-        return False
 
     @property
     def has_engine_deployment(self) -> bool:
@@ -428,6 +411,10 @@ class RewardDeploymentManager:
                 logger.exception("Failed to sleep reward deployment %s", deployment.name)
         if errors:
             raise errors[0]
+
+
+# Backward-compatible name for downstream imports from the initial PR.
+RewardDeploymentManager = MultiRewardModelManager
 
 
 def _to_pil_image(image) -> Image.Image:

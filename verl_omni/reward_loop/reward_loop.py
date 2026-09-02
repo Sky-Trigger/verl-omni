@@ -20,15 +20,15 @@ from verl.experimental.reward_loop.reward_loop import RewardLoopWorker
 from verl.trainer.ppo.reward import resolve_reward_manager_cls
 
 from .deployment import (
+    MultiRewardModelManager,
     NativeRewardExecutor,
     PickScoreEngineAdapter,
-    RewardDeploymentManager,
     RewardDeploymentSpec,
     RouterEngineRewardClient,
     build_native_executor,
     has_reward_deployments,
+    is_engine_backend,
     streaming_reward_enabled,
-    uses_colocated_deployment,
     validate_reward_deployment_terms,
 )
 
@@ -36,7 +36,7 @@ from .deployment import (
 def _build_deployment_clients(specs: dict[str, RewardDeploymentSpec]):
     clients = {}
     for name, spec in specs.items():
-        if spec.backend != "verl_engine":
+        if not is_engine_backend(spec.backend):
             continue
         adapter = spec.native.get("adapter")
         if adapter == "pickscore":
@@ -123,15 +123,15 @@ class OmniRewardLoopManager(RewardLoopManager):
     via ``reward.reward_model.rollout.profiler``.
     """
 
-    def __init__(self, config, rm_resource_pool=None, accelerator_resource_pool=None, engine_resource_pools=None):
+    def __init__(self, config, rm_resource_pool=None, accelerator_resource_pool=None):
         self.accelerator_resource_pool = accelerator_resource_pool
-        self.engine_resource_pools = engine_resource_pools or {}
         if has_reward_deployments(config):
             validate_reward_deployment_terms(config)
-        self.reward_deployment_manager = RewardDeploymentManager(
+        self.reward_deployment_manager = MultiRewardModelManager(
             config,
-            engine_resource_pool=(accelerator_resource_pool if uses_colocated_deployment(config) else rm_resource_pool),
-            engine_resource_pools=self.engine_resource_pools,
+            # The trainer maps Role.RewardModel to global_pool or reward_pool.
+            # Each engine deployment receives a sub-pool from this one parent.
+            resource_pool=rm_resource_pool,
         )
         if self.reward_deployment_manager.deployments:
             if config.reward.reward_model.get("enable", False):

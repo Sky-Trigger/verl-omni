@@ -13,6 +13,12 @@
 # limitations under the License.
 from .reward_loop import OmniRewardLoopManager  # noqa: F401
 from .reward_manager import MultiVisualRewardManager, VisualRewardManager  # noqa: F401
-from .deployment import RewardDeploymentManager  # noqa: F401
+from .deployment import MultiRewardModelManager, RewardDeploymentManager  # noqa: F401
 
-__all__ = ["OmniRewardLoopManager", "VisualRewardManager", "MultiVisualRewardManager", "RewardDeploymentManager"]
+__all__ = [
+    "OmniRewardLoopManager",
+    "VisualRewardManager",
+    "MultiVisualRewardManager",
+    "MultiRewardModelManager",
+    "RewardDeploymentManager",
+]

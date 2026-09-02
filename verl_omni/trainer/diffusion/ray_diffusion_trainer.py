@@ -54,13 +54,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
-from verl_omni.reward_loop.deployment import (
-    get_engine_deployment_resource_pools,
-    reward_is_enabled,
-    reward_role_required,
-    streaming_reward_enabled,
-    uses_deployment_resource_pool,
-)
+from verl_omni.reward_loop.deployment import reward_is_enabled, reward_role_required, streaming_reward_enabled
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
@@ -914,16 +908,10 @@ class BaseRayDiffusionTrainer(ABC):
             if reward_role_required(self.config)
             else None
         )
-        engine_resource_pools = (
-            get_engine_deployment_resource_pools(self.config, self.resource_pool_manager)
-            if uses_deployment_resource_pool(self.config)
-            else {}
-        )
         self.reward_loop_manager = OmniRewardLoopManager(
             config=self.config,
             rm_resource_pool=resource_pool,
             accelerator_resource_pool=actor_rollout_resource_pool,
-            engine_resource_pools=engine_resource_pools,
         )
 
         # create async rollout manager and request scheduler

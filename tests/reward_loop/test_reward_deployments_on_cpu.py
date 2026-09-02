@@ -27,15 +27,13 @@ from omegaconf import OmegaConf
 
 from verl_omni.reward_loop import deployment as deployment_module
 from verl_omni.reward_loop.deployment import (
+    MultiRewardModelManager,
     NativeRewardDeployment,
     NativeRewardExecutor,
     PickScoreEngineAdapter,
     RewardDeploymentManager,
     RewardDeploymentSpec,
     _prepare_engine_config,
-    engine_resource_pool_name,
-    get_engine_deployment_resource_pools,
-    get_engine_deployment_resource_specs,
     reward_is_enabled,
     reward_pool_is_separate,
     reward_role_required,
@@ -57,37 +55,7 @@ def _config(deployments=None):
     return config
 
 
-def test_engine_deployments_get_independent_pool_specs():
-    config = _config(
-        {
-            "ocr": {
-                "backend": "verl_engine",
-                "enable_resource_pool": True,
-                "n_gpus_per_node": 2,
-                "nnodes": 1,
-            },
-            "pickscore": {
-                "backend": "engine",
-                "enable_resource_pool": True,
-                "n_gpus_per_node": 1,
-                "nnodes": 2,
-            },
-            "local": {"backend": "native", "native": {"scorer": "unused:Unused"}},
-        }
-    )
-
-    assert get_engine_deployment_resource_specs(config) == {"ocr": [2], "pickscore": [1, 1]}
-    assert engine_resource_pool_name("ocr") == "reward_deployment_ocr"
-    manager = SimpleNamespace(
-        resource_pool_dict={"reward_deployment_ocr": "ocr-pool", "reward_deployment_pickscore": "pickscore-pool"}
-    )
-    assert get_engine_deployment_resource_pools(config, manager) == {
-        "ocr": "ocr-pool",
-        "pickscore": "pickscore-pool",
-    }
-
-
-def test_multiple_colocated_engine_deployments_are_rejected():
+def test_engine_deployments_require_parent_pool():
     config = _config(
         {
             "ocr": {"backend": "verl_engine"},
@@ -95,35 +63,142 @@ def test_multiple_colocated_engine_deployments_are_rejected():
         }
     )
 
-    with pytest.raises(ValueError, match="At most one engine reward deployment"):
-        get_engine_deployment_resource_specs(config)
+    with pytest.raises(ValueError, match="require a parent resource pool"):
+        RewardDeploymentManager(config)
 
 
-def test_colocated_engine_and_native_deployments_are_rejected():
+def test_mixed_engine_and_native_deployments_require_separate_reward_pool():
     config = _config(
         {
-            "ocr": {"backend": "verl_engine"},
+            "ocr": {"backend": "verl_engine", "model_path": "/models/ocr"},
             "pickscore": {"backend": "native", "adapter": "pickscore"},
         }
     )
 
-    with pytest.raises(ValueError, match="cannot be combined with native"):
-        get_engine_deployment_resource_specs(config)
+    with pytest.raises(ValueError, match="Mixed engine and native"):
+        MultiRewardModelManager(config, resource_pool=SimpleNamespace(world_size=1))
+
+    config.reward.reward_model.enable_resource_pool = True
+    with pytest.raises(ValueError, match="requires a trainer-selected parent resource pool"):
+        MultiRewardModelManager(config)
 
 
-def test_reward_role_is_legacy_only():
-    config = _config({"pickscore": {"backend": "verl_engine", "enable_resource_pool": True}})
+def test_multi_reward_model_manager_splits_parent_pool(monkeypatch):
+    manager = object.__new__(MultiRewardModelManager)
+    manager.resource_pool = SimpleNamespace(world_size=8)
+    parent = manager.resource_pool
+    observed = {}
+
+    def fake_split(pool, sizes):
+        observed["pool"] = pool
+        observed["sizes"] = sizes
+        return [f"sub-{index}" for index in range(len(sizes))]
+
+    monkeypatch.setattr(deployment_module, "split_resource_pool", fake_split)
+    entries = [
+        (
+            "pickscore",
+            {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2},
+        ),
+        (
+            "ocr",
+            {"backend": "verl_engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2},
+        ),
+    ]
+    base_config = {"rollout": {"tensor_model_parallel_size": 1}}
+
+    result = manager._split_engine_resource_pool(entries, base_config)
+
+    assert observed == {"pool": parent, "sizes": [4, 4]}
+    assert result == {"pickscore": "sub-0", "ocr": "sub-1"}
+
+
+def test_multi_reward_model_manager_rejects_parent_pool_overcommit():
+    manager = object.__new__(MultiRewardModelManager)
+    manager.resource_pool = SimpleNamespace(world_size=4)
+    entries = [
+        ("one", {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2}),
+        ("two", {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 1}),
+    ]
+
+    with pytest.raises(ValueError, match="request 6 devices"):
+        manager._split_engine_resource_pool(entries, {"rollout": {"tensor_model_parallel_size": 1}})
+
+
+def test_multi_reward_model_manager_binds_each_engine_to_its_sub_pool(monkeypatch):
+    config = _config(
+        {
+            "pickscore": {
+                "backend": "engine",
+                "model_path": "/models/pickscore",
+                "rollout": {"tensor_model_parallel_size": 2},
+            },
+            "ocr": {
+                "backend": "verl_engine",
+                "model_path": "/models/ocr",
+                "rollout": {"tensor_model_parallel_size": 2},
+            },
+        }
+    )
+    parent_pool = SimpleNamespace(world_size=4)
+    observed = []
+
+    def fake_split(pool, sizes):
+        assert pool is parent_pool
+        assert sizes == [2, 2]
+        return ["pickscore-pool", "ocr-pool"]
+
+    class FakeEngineDeployment:
+        def __init__(self, name, deployment, base_config, resource_pool, fallback_model):
+            del deployment, base_config, fallback_model
+            observed.append((name, resource_pool))
+            self._spec = RewardDeploymentSpec(name, "verl_engine", None, f"{name}:8000", {})
+
+        @property
+        def worker_spec(self):
+            return self._spec
+
+        def wake_up(self):
+            return None
+
+        def sleep(self):
+            return None
+
+    monkeypatch.setattr(deployment_module, "split_resource_pool", fake_split)
+    monkeypatch.setattr(deployment_module, "VerlEngineRewardDeployment", FakeEngineDeployment)
+
+    manager = MultiRewardModelManager(config, resource_pool=parent_pool)
+
+    assert observed == [("pickscore", "pickscore-pool"), ("ocr", "ocr-pool")]
+    assert set(manager.worker_specs) == {"pickscore", "ocr"}
+
+
+def test_engine_deployment_requires_trainer_parent_pool():
+    config = _config({"pickscore": {"backend": "engine"}})
     assert reward_is_enabled(config)
-    assert not reward_role_required(config)
+    assert reward_role_required(config)
     assert not reward_pool_is_separate(config)
     assert not streaming_reward_enabled(config)
 
-    config.reward.deployments = OmegaConf.create({})
-    config.reward.reward_model.enable = True
     config.reward.reward_model.enable_resource_pool = True
     assert reward_role_required(config)
     assert reward_pool_is_separate(config)
+    assert not streaming_reward_enabled(config)
+
+
+def test_native_only_deployment_does_not_create_a_reward_model_pool():
+    config = _config({"pickscore": {"backend": "native", "adapter": "pickscore"}})
+
+    assert reward_is_enabled(config)
+    assert not reward_role_required(config)
     assert streaming_reward_enabled(config)
+
+
+def test_engine_deployment_rejects_legacy_per_deployment_pool_switch():
+    config = _config({"ocr": {"backend": "engine", "enable_resource_pool": True}})
+
+    with pytest.raises(ValueError, match="must not set enable_resource_pool"):
+        MultiRewardModelManager(config, resource_pool=SimpleNamespace(world_size=1))
 
 
 def test_native_pickscore_adapter_is_selected_by_default():
