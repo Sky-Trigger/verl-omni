@@ -115,8 +115,15 @@ def validate_reward_deployment_terms(config) -> None:
 
 
 def reward_role_required(config) -> bool:
-    """Whether the reward loop needs the trainer-selected parent pool."""
-    return bool(config.reward.reward_model.get("enable", False) or has_engine_reward_deployments(config))
+    """Whether the reward loop needs the trainer-selected parent pool.
+
+    Every named deployment is managed from the trainer-selected ``global_pool``
+    or ``reward_pool``.  This includes native deployments: their worker
+    placement must use the native subpool selected by
+    ``MultiRewardModelManager`` rather than implicitly borrowing the actor
+    pool.
+    """
+    return bool(config.reward.reward_model.get("enable", False) or has_reward_deployments(config))
 
 
 def reward_pool_is_separate(config) -> bool:
@@ -137,9 +144,20 @@ def streaming_reward_enabled(config) -> bool:
 
 def accelerator_workers_enabled(config) -> bool:
     """Whether custom reward workers should use the accelerator placement helper."""
-    accelerator_workers = config.reward.get("accelerator_workers", {}) or {}
-    legacy_custom = config.reward.get("custom_reward_function", {}) or {}
-    return bool(accelerator_workers.get("enabled", False) or legacy_custom.get("use_accelerator", False))
+    reward = config.reward
+    if hasattr(reward, "get"):
+        accelerator_workers = reward.get("accelerator_workers", {}) or {}
+        legacy_custom = reward.get("custom_reward_function", {}) or {}
+    else:
+        accelerator_workers = getattr(reward, "accelerator_workers", {}) or {}
+        legacy_custom = getattr(reward, "custom_reward_function", {}) or {}
+
+    def value(mapping, key, default=False):
+        if hasattr(mapping, "get"):
+            return mapping.get(key, default)
+        return getattr(mapping, key, default)
+
+    return bool(value(accelerator_workers, "enabled") or value(legacy_custom, "use_accelerator"))
 
 
 def _coerce_mapping(value) -> dict[str, Any]:
@@ -291,10 +309,11 @@ class MultiRewardModelManager:
     """Create and lifecycle-manage all configured reward deployments.
 
     The manager lives in the trainer/controller process. It receives one
-    trainer-selected parent pool and splits it between engine deployments
-    before constructing one upstream ``RewardModelManager`` per deployment.
-    Native deployments are represented here and instantiated lazily by
-    ``NativeRewardExecutor`` in the reward-loop worker that owns an accelerator.
+    trainer-selected parent pool and splits it into disjoint engine and native
+    subpools before constructing one upstream ``RewardModelManager`` per engine
+    deployment. Native deployments are represented here and instantiated
+    lazily by ``NativeRewardExecutor`` in reward-loop workers placed on the
+    native subpool.
     """
 
     def __init__(self, config, resource_pool=None):
@@ -303,23 +322,27 @@ class MultiRewardModelManager:
         self.config = config
         self.resource_pool = resource_pool
         self.deployments: dict[str, RewardDeployment] = {}
+        self.engine_resource_pools: dict[str, Any] = {}
+        self.native_resource_pool = None
         entries = config.reward.get("deployments", {}) or {}
         fallback_model = config.reward.reward_model.get("model_path")
         base_config = config.reward.reward_model
         engine_entries = [
             (name, deployment) for name, deployment in entries.items() if is_engine_backend(deployment.get("backend"))
         ]
-        if engine_entries and has_native_reward_deployments(config) and not reward_pool_is_separate(config):
-            raise ValueError(
-                "Mixed engine and native reward deployments require reward.reward_model.enable_resource_pool=true"
-            )
         for name, deployment in engine_entries:
             if "enable_resource_pool" in deployment:
                 raise ValueError(
                     f"Engine reward deployment {name!r} must not set enable_resource_pool; "
                     "select the parent pool with reward.reward_model.enable_resource_pool instead"
                 )
-        engine_pools = self._split_engine_resource_pool(engine_entries, base_config)
+        native_entries = [
+            (name, deployment) for name, deployment in entries.items() if deployment.get("backend") in _NATIVE_BACKENDS
+        ]
+        engine_pools, self.native_resource_pool = self._split_deployment_resource_pools(
+            engine_entries, native_entries, base_config
+        )
+        self.engine_resource_pools = engine_pools
         for name, deployment in entries.items():
             backend = deployment.get("backend")
             if is_engine_backend(backend):
@@ -352,12 +375,26 @@ class MultiRewardModelManager:
         return replicas * values[0] * values[1] * values[2]
 
     def _split_engine_resource_pool(self, engine_entries, base_config) -> dict[str, Any]:
-        if not engine_entries:
-            return {}
-        if self.resource_pool is None:
-            raise ValueError("Engine reward deployments require a trainer-selected parent resource pool")
+        """Backward-compatible engine-only view of the parent-pool split."""
+        engine_pools, _ = self._split_deployment_resource_pools(engine_entries, [], base_config)
+        return engine_pools
 
-        requested_sizes = []
+    def _split_deployment_resource_pools(self, engine_entries, native_entries, base_config):
+        """Split the selected parent pool between engine and native workers.
+
+        Engine deployments reserve the number of bundles needed by their
+        rollout replicas. Native deployments share one subpool because each
+        reward-loop worker owns all configured native scorers; that subpool is
+        sized to ``reward.num_workers``. Any unrequested bundles are returned
+        as an unused trailing split so ``split_resource_pool`` receives the
+        complete parent-pool size it requires.
+        """
+        if not engine_entries and not native_entries:
+            return {}, None
+        engine_requested_sizes = []
+        if self.resource_pool is None:
+            raise ValueError("Reward deployments require a parent resource pool selected by the trainer")
+
         for name, deployment in engine_entries:
             explicit_gpus = deployment.get("n_gpus_per_node")
             explicit_nodes = deployment.get("nnodes")
@@ -375,20 +412,33 @@ class MultiRewardModelManager:
                     f"Engine reward deployment {name!r} allocation ({requested}) must be a multiple of "
                     f"rollout world size ({rollout_world_size})"
                 )
-            requested_sizes.append(requested)
+            engine_requested_sizes.append(requested)
+
+        native_requested = 0
+        if native_entries:
+            native_requested = int(self.config.reward.num_workers)
+            if native_requested <= 0:
+                raise ValueError("reward.num_workers must be positive for native reward deployments")
 
         parent_world_size = self.resource_pool.world_size
-        requested_total = sum(requested_sizes)
+        requested_total = sum(engine_requested_sizes) + native_requested
         if requested_total > parent_world_size:
             raise ValueError(
-                f"Engine reward deployments request {requested_total} devices, "
-                f"but the parent reward pool has only {parent_world_size}"
+                f"Reward deployments request {requested_total} devices, but the parent reward pool has only "
+                f"{parent_world_size}"
             )
-        split_sizes = requested_sizes
+        split_sizes = [*engine_requested_sizes]
+        if native_requested:
+            split_sizes.append(native_requested)
         if requested_total < parent_world_size:
             split_sizes = [*split_sizes, parent_world_size - requested_total]
         sub_pools = split_resource_pool(self.resource_pool, split_sizes)
-        return {name: pool for (name, _), pool in zip(engine_entries, sub_pools[: len(engine_entries)], strict=True)}
+        engine_count = len(engine_entries)
+        engine_pools = {
+            name: pool for (name, _), pool in zip(engine_entries, sub_pools[:engine_count], strict=True)
+        }
+        native_pool = sub_pools[engine_count] if native_requested else None
+        return engine_pools, native_pool
 
     @property
     def reward_executor_specs(self) -> dict[str, RewardExecutorSpec]:
@@ -558,11 +608,6 @@ class NativeRewardExecutor:
         self._idle = asyncio.Event()
         self._idle.set()
         self._lock = asyncio.Lock()
-        # A scorer owns one framework model instance.  ``RewardLoopWorker``
-        # fans a batch out into coroutines, so protect that instance from
-        # simultaneous framework calls while still allowing all callers to be
-        # counted by ``sleep``.
-        self._score_lock = asyncio.Lock()
 
     async def wake_up(self) -> None:
         async with self._lock:
@@ -596,14 +641,22 @@ class NativeRewardExecutor:
                     self._idle.set()
                 raise
         try:
-            async with self._score_lock:
-                scorer = self._scorer
-                pil_image = _to_pil_image(image)
-                score_fn = getattr(scorer, "score", None)
-                if score_fn is None:
-                    result = await asyncio.get_running_loop().run_in_executor(None, scorer, prompt, pil_image)
-                else:
-                    result = await asyncio.get_running_loop().run_in_executor(None, score_fn, [prompt], [pil_image])
+            scorer = self._scorer
+            pil_image = _to_pil_image(image)
+            score_fn = getattr(scorer, "score", None)
+            if score_fn is None:
+                result = await asyncio.get_running_loop().run_in_executor(None, scorer, prompt, pil_image)
+            elif inspect.iscoroutinefunction(score_fn):
+                # A native scorer may implement its own batching policy.  For
+                # example, PickScoreNativeScorer queues these one-sample calls
+                # and performs one CLIP forward for the ready batch.
+                result = await score_fn([prompt], [pil_image])
+            else:
+                # The upstream reward loop fans a batch out into concurrent
+                # coroutines.  Do not serialize those calls here: a scorer
+                # that needs batching or framework-specific synchronization
+                # owns that policy itself.
+                result = await asyncio.get_running_loop().run_in_executor(None, score_fn, [prompt], [pil_image])
             if inspect.isawaitable(result):
                 result = await result
             if isinstance(result, torch.Tensor):
@@ -632,7 +685,10 @@ class NativeRewardExecutor:
                 if scorer is not None:
                     close = getattr(scorer, "close", None)
                     if close is not None:
-                        result = await asyncio.get_running_loop().run_in_executor(None, close)
+                        if inspect.iscoroutinefunction(close):
+                            result = await close()
+                        else:
+                            result = await asyncio.get_running_loop().run_in_executor(None, close)
                         if inspect.isawaitable(result):
                             await result
                 gc.collect()

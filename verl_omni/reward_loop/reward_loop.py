@@ -154,16 +154,27 @@ class OmniRewardLoopManager(RewardLoopManager):
         has_native = any(spec.backend == "native" for spec in specs.values())
         use_accelerator_workers = accelerator_workers_enabled(self.config)
         if has_native or use_accelerator_workers:
-            if self.accelerator_resource_pool is None:
-                if has_native:
-                    raise ValueError("Native reward deployments require an accelerator resource pool")
+            if has_native:
+                # Named native deployments use the disjoint subpool carved out
+                # by MultiRewardModelManager from the selected global/reward
+                # parent pool. Legacy accelerator workers still use the actor
+                # pool passed separately by the trainer.
+                accelerator_resource_pool = self.multi_reward_model_manager.native_resource_pool
+                if accelerator_resource_pool is None:
+                    raise ValueError(
+                        "Native reward deployments require an accelerator resource pool; "
+                        "MultiRewardModelManager could not allocate the native subpool"
+                    )
+            else:
+                accelerator_resource_pool = self.accelerator_resource_pool
+            if accelerator_resource_pool is None:
                 raise ValueError("Accelerator reward workers require an accelerator resource pool")
             from .accelerator_reward_workers import build_accelerator_reward_workers
 
             self.reward_loop_workers = build_accelerator_reward_workers(
                 config=self.config,
                 reward_loop_workers_class=self.reward_loop_workers_class,
-                accelerator_resource_pool=self.accelerator_resource_pool,
+                accelerator_resource_pool=accelerator_resource_pool,
                 reward_router_address=self.reward_router_address,
                 reward_executor_specs=specs,
             )

@@ -278,8 +278,8 @@ class TestMultiVisualRewardManagerRunSingle:
         assert "reward/dict_result/score" not in result["reward_extra_info"]
         assert result["reward_extra_info"]["reward/combined"] == pytest.approx(2.0)
 
-    def test_exception_contributes_zero(self):
-        """A failing sub-reward contributes 0 without breaking others."""
+    def test_exception_fails_fast(self):
+        """A failing sub-reward aborts reward computation."""
         reward_fns = {
             "good": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0},
             "bad": {"path": DUMMY_REWARDS_PATH, "name": "reward_raises", "weight": 1.0},
@@ -287,11 +287,8 @@ class TestMultiVisualRewardManagerRunSingle:
         manager = _build_manager(reward_fns)
         data = _make_single_data()
 
-        result = manager.loop.run_until_complete(manager.run_single(data))
-
-        # combined = 1.0 * 0.5 + 1.0 * 0.0 = 0.5
-        assert result["reward_score"] == pytest.approx(0.5)
-        assert result["reward_extra_info"]["reward/bad"] == pytest.approx(0.0)
+        with pytest.raises(ValueError, match="intentional failure"):
+            manager.loop.run_until_complete(manager.run_single(data))
 
     def test_async_reward_function(self):
         """Async reward functions are awaited correctly."""

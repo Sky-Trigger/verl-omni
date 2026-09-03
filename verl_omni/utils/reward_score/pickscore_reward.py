@@ -105,7 +105,15 @@ class _PickScoreInferencer:
 
 
 class PickScoreNativeScorer:
-    """Lifecycle-friendly synchronous PickScore scorer for native deployments."""
+    """Lifecycle-friendly PickScore scorer for native deployments.
+
+    ``RewardLoopWorker.compute_score_batch`` fans a batch out into concurrent
+    single-item calls.  This scorer preserves the old PickScore batching
+    behavior by collecting those calls locally and running one CLIP forward for
+    up to ``_MAX_BATCH_SIZE`` items.  The queue belongs to this scorer instance
+    (rather than module globals), so ``NativeRewardExecutor.sleep`` can stop it
+    and release the model before actor update.
+    """
 
     def __init__(self, model_path: str = _MODEL_PATH, device=None, dtype=torch.float32, processor_path=_PROCESSOR_PATH):
         self._inferencer = _PickScoreInferencer(
@@ -114,11 +122,82 @@ class PickScoreNativeScorer:
             model_path=model_path,
             processor_path=processor_path,
         )
+        self._score_queue = asyncio.Queue()
+        self._consumer_task = None
+        self._consumer_lock = asyncio.Lock()
+        self._closed = False
 
-    def score(self, prompts, images):
-        return self._inferencer.score(list(prompts), list(images))
+    async def _ensure_consumer(self):
+        if self._closed:
+            raise RuntimeError("PickScore scorer is closed")
+        if self._consumer_task is not None and not self._consumer_task.done():
+            return
+        async with self._consumer_lock:
+            if self._closed:
+                raise RuntimeError("PickScore scorer is closed")
+            if self._consumer_task is None or self._consumer_task.done():
+                self._consumer_task = asyncio.create_task(self._consumer_loop())
 
-    def close(self):
+    def _score_requests(self, requests):
+        prompts = [prompt for prompt, _, _ in requests]
+        images = [image for _, image, _ in requests]
+        return self._inferencer.score(prompts, images).tolist()
+
+    async def _consumer_loop(self):
+        loop = asyncio.get_running_loop()
+        while True:
+            request = await self._score_queue.get()
+            if request[0] is None:
+                return
+
+            requests = [request]
+            should_stop = False
+            # Let all compute_score() tasks created by compute_score_batch reach
+            # the queue before taking the rest of this micro-batch.
+            await asyncio.sleep(0)
+            while len(requests) < _MAX_BATCH_SIZE:
+                try:
+                    request = self._score_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if request[0] is None:
+                    should_stop = True
+                    break
+                requests.append(request)
+
+            try:
+                scores = await loop.run_in_executor(None, self._score_requests, requests)
+                for (_, _, future), score in zip(requests, scores, strict=True):
+                    if not future.done():
+                        future.set_result(score)
+            except BaseException as error:
+                for *_, future in requests:
+                    if not future.done():
+                        future.set_exception(error)
+
+            if should_stop:
+                return
+
+    async def score(self, prompts, images):
+        prompts = list(prompts)
+        images = list(images)
+        if len(prompts) != len(images):
+            raise ValueError("PickScore prompts and images must have the same length")
+        await self._ensure_consumer()
+        loop = asyncio.get_running_loop()
+        futures = []
+        for prompt, image in zip(prompts, images, strict=True):
+            future = loop.create_future()
+            futures.append(future)
+            await self._score_queue.put((prompt, image, future))
+        return await asyncio.gather(*futures)
+
+    async def close(self):
+        self._closed = True
+        if self._consumer_task is not None and not self._consumer_task.done():
+            await self._score_queue.put((None, None, None))
+            await self._consumer_task
+        self._consumer_task = None
         # Drop the whole inferencer before clearing the allocator: retaining a
         # local ``model`` variable here would keep its accelerator storage live.
         if hasattr(self, "_inferencer"):

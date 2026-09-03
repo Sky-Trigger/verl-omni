@@ -71,7 +71,7 @@ class MultiVisualRewardManager(VisualRewardManager):
 
         self._sub_rewards = []
         total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight", "required", "deployment"}
+        _reserved_keys = {"path", "name", "weight", "deployment"}
         for key, entry in reward_functions_cfg.items():
             deployment = entry.get("deployment")
             path = entry.get("path")
@@ -81,16 +81,6 @@ class MultiVisualRewardManager(VisualRewardManager):
             if deployment is None and path is None:
                 raise ValueError(f"Reward function {key!r} requires either deployment or path/name")
             weight = float(entry.get("weight", 1.0))
-            required_value = entry.get("required", False)
-            if isinstance(required_value, str):
-                normalized = required_value.lower()
-                if normalized not in {"true", "false"}:
-                    raise ValueError(f"Invalid required value: {required_value!r}")
-                required = normalized == "true"
-            elif isinstance(required_value, bool):
-                required = required_value
-            else:
-                raise TypeError(f"required must be a boolean, got {type(required_value).__name__}")
             total_weight += weight
 
             # Collect extra config fields (beyond path/name/weight) to pass to compute_score
@@ -105,7 +95,6 @@ class MultiVisualRewardManager(VisualRewardManager):
                     "key": key,
                     "fn": fn,
                     "weight": weight,
-                    "required": required,
                     "sig": sig,
                     "is_async": is_async,
                     "extra_args": extra_args,
@@ -174,7 +163,6 @@ class MultiVisualRewardManager(VisualRewardManager):
             key = sub["key"]
             fn = sub["fn"]
             weight = sub["weight"]
-            required = sub["required"]
             sig = sub["sig"]
             is_async = sub["is_async"]
             extra_args = sub["extra_args"]
@@ -184,57 +172,45 @@ class MultiVisualRewardManager(VisualRewardManager):
             sub_kwargs = {**all_kwargs, **extra_args}
             filtered_kwargs = _filter_kwargs(sub_kwargs, sig) if sig is not None else {}
 
-            try:
-                if deployment is not None and fn is not None:
-                    try:
-                        executor = self._engine_reward_executors[deployment]
-                    except KeyError as exc:
-                        raise RuntimeError(
-                            f"Reward deployment {deployment!r} does not provide an engine router"
-                        ) from exc
-                    reward_kwargs = getattr(executor, "reward_kwargs", None)
-                    if reward_kwargs is None:
-                        raise RuntimeError(f"Reward deployment {deployment!r} cannot be used with a reward function")
-                    filtered_kwargs = _filter_kwargs({**sub_kwargs, **reward_kwargs()}, sig)
-                    if is_async:
-                        result = await fn(**filtered_kwargs)
-                    else:
-                        result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
-                elif deployment is not None:
-                    if deployment in self._engine_reward_executors:
-                        result = await self._engine_reward_executors[deployment].score(
-                            ground_truth or "", response_visual
-                        )
-                    elif deployment in self._native_reward_executors:
-                        result = await self._native_reward_executors[deployment].score(
-                            ground_truth or "", response_visual
-                        )
-                    else:
-                        raise RuntimeError(f"Reward deployment {deployment!r} is not available in this worker")
-                elif is_async:
+            if deployment is not None and fn is not None:
+                try:
+                    executor = self._engine_reward_executors[deployment]
+                except KeyError as exc:
+                    raise RuntimeError(
+                        f"Reward deployment {deployment!r} does not provide an engine router"
+                    ) from exc
+                reward_kwargs = getattr(executor, "reward_kwargs", None)
+                if reward_kwargs is None:
+                    raise RuntimeError(f"Reward deployment {deployment!r} cannot be used with a reward function")
+                filtered_kwargs = _filter_kwargs({**sub_kwargs, **reward_kwargs()}, sig)
+                if is_async:
                     result = await fn(**filtered_kwargs)
                 else:
                     result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
-
-                if isinstance(result, dict):
-                    score = float(result["score"])
-                    for rk, rv in result.items():
-                        if rk == "score":
-                            continue
-                        reward_extra_info[f"reward/{key}/{rk}"] = rv
+            elif deployment is not None:
+                if deployment in self._engine_reward_executors:
+                    result = await self._engine_reward_executors[deployment].score(
+                        ground_truth or "", response_visual
+                    )
+                elif deployment in self._native_reward_executors:
+                    result = await self._native_reward_executors[deployment].score(
+                        ground_truth or "", response_visual
+                    )
                 else:
-                    score = float(result)
+                    raise RuntimeError(f"Reward deployment {deployment!r} is not available in this worker")
+            elif is_async:
+                result = await fn(**filtered_kwargs)
+            else:
+                result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
 
-            except Exception as e:
-                if required:
-                    raise RuntimeError(f"Required sub-reward '{key}' failed: {e}") from e
-                logger.exception(
-                    "Sub-reward '%s' raised an exception: %s. Contributing 0 to weighted sum.",
-                    key,
-                    e,
-                )
-                reward_extra_info[f"reward/{key}/errors"] = 1
-                score = 0.0
+            if isinstance(result, dict):
+                score = float(result["score"])
+                for rk, rv in result.items():
+                    if rk == "score":
+                        continue
+                    reward_extra_info[f"reward/{key}/{rk}"] = rv
+            else:
+                score = float(result)
 
             reward_extra_info[f"reward/{key}"] = score
             combined_score += weight * score

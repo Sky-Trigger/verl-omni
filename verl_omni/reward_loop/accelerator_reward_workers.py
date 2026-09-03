@@ -38,12 +38,23 @@ def build_accelerator_reward_workers(
             "Accelerator reward workers require resource_pool.max_colocate_count >= 2 when colocated with ActorRollout"
         )
     placement_groups = accelerator_resource_pool.get_placement_groups(device_name=get_device_name())
-    bundles = [
-        (placement_group, bundle_index)
-        for bundle_index in range(max(accelerator_resource_pool.store))
-        for placement_group, local_world_size in zip(placement_groups, accelerator_resource_pool.store, strict=True)
-        if bundle_index < local_world_size
-    ]
+    # SubRayResourcePool keeps the original placement groups and records the
+    # flat bundle offset.  Respect that offset so a native subpool does not
+    # accidentally schedule on the engine deployment's bundles.
+    start_bundle_index = getattr(accelerator_resource_pool, "start_bundle_index", None)
+    if start_bundle_index is None:
+        bundles = [
+            (placement_group, bundle_index)
+            for bundle_index in range(max(accelerator_resource_pool.store))
+            for placement_group, local_world_size in zip(placement_groups, accelerator_resource_pool.store, strict=True)
+            if bundle_index < local_world_size
+        ]
+    else:
+        local_world_size = accelerator_resource_pool.store[0]
+        bundles = []
+        for flat_index in range(start_bundle_index, start_bundle_index + accelerator_resource_pool.world_size):
+            pg_index, bundle_index = divmod(flat_index, local_world_size)
+            bundles.append((placement_groups[pg_index], bundle_index))
 
     num_workers = config.reward.num_workers
     if num_workers > len(bundles):

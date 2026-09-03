@@ -39,7 +39,9 @@ reward_functions: {}
 # the existing verl RewardModelManager) and ``native`` (verl-omni worker-local
 # model). Trainer selects one
 # parent global_pool or reward_pool through reward_model.enable_resource_pool;
-# MultiRewardModelManager splits that parent pool among engine deployments.
+# MultiRewardModelManager splits that parent pool into disjoint engine and
+# native subpools. Native deployments share one subpool sized to
+# reward.num_workers because each worker owns all configured native scorers.
 # Native PickScore example:
 #
 # deployments:

@@ -41,6 +41,12 @@ class _FakeResourcePool:
         return ["pg0", "pg1"]
 
 
+class _FakeSubResourcePool(_FakeResourcePool):
+    store = [4, 4]
+    start_bundle_index = 2
+    world_size = 3
+
+
 def _config(num_workers):
     return SimpleNamespace(reward=SimpleNamespace(num_workers=num_workers))
 
@@ -93,3 +99,26 @@ def test_accelerator_reward_workers_require_colocation_capacity():
 
     with pytest.raises(ValueError, match="max_colocate_count >= 2"):
         _build_workers(1, resource_pool)
+
+
+def test_accelerator_reward_workers_respect_subpool_bundle_offset(monkeypatch):
+    resource_pool = _FakeSubResourcePool()
+    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
+    monkeypatch.setattr(
+        worker_module,
+        "get_platform",
+        lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "PlacementGroupSchedulingStrategy",
+        lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
+    )
+
+    workers = _build_workers(3, resource_pool)
+
+    assert [worker.options["scheduling_strategy"] for worker in workers] == [
+        ("pg0", 2),
+        ("pg0", 3),
+        ("pg1", 0),
+    ]

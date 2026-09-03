@@ -67,20 +67,33 @@ def test_engine_deployments_require_parent_pool():
         MultiRewardModelManager(config)
 
 
-def test_mixed_engine_and_native_deployments_require_separate_reward_pool():
+def test_mixed_engine_and_native_deployments_share_one_parent_pool(monkeypatch):
     config = _config(
         {
             "ocr": {"backend": "engine", "model_path": "/models/ocr"},
             "pickscore": {"backend": "native", "adapter": "pickscore"},
         }
     )
+    manager = object.__new__(MultiRewardModelManager)
+    manager.config = config
+    manager.resource_pool = SimpleNamespace(world_size=10)
+    observed = {}
 
-    with pytest.raises(ValueError, match="Mixed engine and native"):
-        MultiRewardModelManager(config, resource_pool=SimpleNamespace(world_size=1))
+    def fake_split(pool, sizes):
+        observed["pool"] = pool
+        observed["sizes"] = sizes
+        return ["engine-pool", "native-pool", "unused-pool"]
 
-    config.reward.reward_model.enable_resource_pool = True
-    with pytest.raises(ValueError, match="requires a trainer-selected parent resource pool"):
-        MultiRewardModelManager(config)
+    monkeypatch.setattr(deployment_module, "split_resource_pool", fake_split)
+    engine_pools, native_pool = manager._split_deployment_resource_pools(
+        [("ocr", config.reward.deployments.ocr)],
+        [("pickscore", config.reward.deployments.pickscore)],
+        config.reward.reward_model,
+    )
+
+    assert observed == {"pool": manager.resource_pool, "sizes": [2, 8]}
+    assert engine_pools == {"ocr": "engine-pool"}
+    assert native_pool == "native-pool"
 
 
 def test_multi_reward_model_manager_splits_parent_pool(monkeypatch):
@@ -190,7 +203,7 @@ def test_native_only_deployment_does_not_create_a_reward_model_pool():
     config = _config({"pickscore": {"backend": "native", "adapter": "pickscore"}})
 
     assert reward_is_enabled(config)
-    assert not reward_role_required(config)
+    assert reward_role_required(config)
     assert streaming_reward_enabled(config)
 
 
@@ -370,6 +383,59 @@ async def test_native_executor_waits_for_inflight_score_before_sleep(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_native_executor_does_not_serialize_async_scorer_calls(monkeypatch):
+    class _BatchingScorer:
+        instances = []
+
+        def __init__(self, **kwargs):
+            del kwargs
+            self._entered = 0
+            self._second_request = asyncio.Event()
+            self.closed = False
+            self.__class__.instances.append(self)
+
+        async def score(self, prompts, images):
+            del prompts, images
+            self._entered += 1
+            if self._entered == 2:
+                self._second_request.set()
+            await self._second_request.wait()
+            return [0.5]
+
+        async def close(self):
+            self.closed = True
+
+    spec = RewardExecutorSpec(
+        name="native",
+        backend="native",
+        model_path=None,
+        router_address=None,
+        executor_config={"scorer": "tests.fake:BatchingScorer"},
+    )
+    executor = NativeRewardExecutor(spec)
+    _BatchingScorer.instances.clear()
+    monkeypatch.setattr(deployment_module, "_load_native_scorer", lambda _: _BatchingScorer)
+    monkeypatch.setattr(deployment_module, "get_device_name", lambda: "cpu")
+    monkeypatch.setattr(deployment_module, "get_device_id", lambda: 0)
+
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            executor.score("first", torch.zeros(3, 2, 2, dtype=torch.uint8)),
+            executor.score("second", torch.zeros(3, 2, 2, dtype=torch.uint8)),
+        ),
+        timeout=1,
+    )
+    await executor.sleep()
+
+    assert results == [
+        {"score": 0.5, "pickscore_raw": 0.5},
+        {"score": 0.5, "pickscore_raw": 0.5},
+    ]
+    assert _BatchingScorer.instances[0]._entered == 2
+    assert _BatchingScorer.instances[0].closed
+
+
+@pytest.mark.asyncio
 async def test_pickscore_engine_adapter_posts_openai_embedding_payloads(monkeypatch):
     requests = []
 
@@ -444,6 +510,7 @@ def test_native_deployment_requires_accelerator_resource_pool():
     manager.accelerator_resource_pool = None
     manager.config = SimpleNamespace(reward=SimpleNamespace(accelerator_workers={}))
     manager.multi_reward_model_manager = SimpleNamespace(
+        native_resource_pool=None,
         reward_executor_specs={
             "pickscore": RewardExecutorSpec(
                 name="pickscore",
