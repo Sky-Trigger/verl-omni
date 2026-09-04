@@ -6,11 +6,13 @@ set -x
 export VLLM_ASCEND_ENABLE_NZ=0
 export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 model_name=${MODEL_PATH:-Qwen/Qwen-Image-Edit-2511}
-reward_function_path=${REWARD_FUNCTION_PATH:-pkg://verl_omni.utils.reward_score.pickscore_reward}
+pickscore_model_path=${PICKSCORE_MODEL_PATH:-yuvalkirstain/PickScore_v1}
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
-REWARD_WORKERS=${REWARD_WORKERS:-16}
+# Native-pool bundle indices. Each entry loads one complete PickScore model;
+# these are not physical NPU IDs and are not tensor-parallel ranks.
+NATIVE_REWARD_DEVICES=${NATIVE_REWARD_DEVICES:-"[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]"}
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 
@@ -60,7 +62,6 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.model.attn_backend='_native_npu' \
     actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
-    reward.accelerator_workers.enabled=True \
     trainer.device=npu \
     trainer.use_v1=True \
     actor_rollout_ref.rollout.cudagraph_capture_sizes="[1,2,4,8,16,32,64,128,256,384,512,640,768,896,1024]" \
@@ -83,10 +84,12 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=40 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-    reward.num_workers=$REWARD_WORKERS \
     reward.reward_model.enable=False \
-    reward.custom_reward_function.path=$reward_function_path \
-    reward.custom_reward_function.name=compute_score_pickscore \
+    +reward.deployments.pickscore.backend=native \
+    +reward.deployments.pickscore.adapter=pickscore \
+    +reward.deployments.pickscore.model_path=$pickscore_model_path \
+    +reward.deployments.pickscore.placement.devices="$NATIVE_REWARD_DEVICES" \
+    +reward.reward_functions.pickscore.deployment=pickscore \
     trainer.logger='["console", "tensorboard"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=qwen_image_edit_lora_pickscore \

@@ -139,7 +139,13 @@ def streaming_reward_enabled(config) -> bool:
         # The controller owns engine wake/sleep around ``compute_rm_score``;
         # streaming workers have no controller callback at request time.
         return False
-    return has_native_reward_deployments(config) or bool(config.reward.reward_model.get("enable_resource_pool", False))
+    if has_native_reward_deployments(config):
+        # A named native deployment has its own explicitly placed worker
+        # group.  The upstream streaming interface accepts one worker list,
+        # so it cannot fan one request out to all native deployment groups.
+        # Native rewards deliberately retain ordinary batch scoring.
+        return False
+    return bool(config.reward.reward_model.get("enable_resource_pool", False))
 
 
 def accelerator_workers_enabled(config) -> bool:
@@ -339,6 +345,7 @@ class MultiRewardModelManager:
         native_entries = [
             (name, deployment) for name, deployment in entries.items() if deployment.get("backend") in _NATIVE_BACKENDS
         ]
+        self.native_device_assignments = self._validate_native_device_assignments(native_entries)
         engine_pools, self.native_resource_pool = self._split_deployment_resource_pools(
             engine_entries, native_entries, base_config
         )
@@ -379,15 +386,77 @@ class MultiRewardModelManager:
         engine_pools, _ = self._split_deployment_resource_pools(engine_entries, [], base_config)
         return engine_pools
 
+    @staticmethod
+    def _validate_native_device_assignments(native_entries) -> dict[str, tuple[int, ...]]:
+        """Validate native worker placement and return native-pool indices.
+
+        ``placement.devices`` intentionally addresses *bundles in the native
+        subpool*, never a physical CUDA/NPU index.  Ray can remap visible
+        devices inside an actor, whereas placement-group bundle indices remain
+        stable.  A listed bundle hosts one complete native model instance and
+        cannot be shared by another native deployment.
+        """
+        assignments: dict[str, tuple[int, ...]] = {}
+        claimed_devices: dict[int, str] = {}
+        engine_fields = {
+            "replicas",
+            "rollout",
+            "n_gpus_per_node",
+            "nnodes",
+            "tensor_model_parallel_size",
+            "data_parallel_size",
+            "pipeline_model_parallel_size",
+            "expert_parallel_size",
+            "enable_resource_pool",
+        }
+        for name, deployment in native_entries:
+            unsupported = sorted(field for field in engine_fields if deployment.get(field) is not None)
+            if unsupported:
+                fields = ", ".join(unsupported)
+                raise ValueError(
+                    f"Native reward deployment {name!r} does not support engine resource fields: {fields}"
+                )
+
+            placement = deployment.get("placement")
+            if placement is not None and not isinstance(placement, dict):
+                placement = OmegaConf.to_container(placement, resolve=False)
+            if not isinstance(placement, dict) or "devices" not in placement:
+                raise ValueError(
+                    f"Native reward deployment {name!r} requires placement.devices as native-pool bundle indices"
+                )
+            devices = placement["devices"]
+            if not isinstance(devices, list) or not devices:
+                raise ValueError(f"Native reward deployment {name!r} placement.devices must be a non-empty list")
+
+            normalized_devices = []
+            for device in devices:
+                if isinstance(device, bool) or not isinstance(device, int) or device < 0:
+                    raise ValueError(
+                        f"Native reward deployment {name!r} placement.devices must contain non-negative integers"
+                    )
+                if device in normalized_devices:
+                    raise ValueError(
+                        f"Native reward deployment {name!r} placement.devices contains duplicate index {device}"
+                    )
+                if device in claimed_devices:
+                    raise ValueError(
+                        f"Native reward deployment {name!r} placement.devices overlaps index {device} "
+                        f"already assigned to {claimed_devices[device]!r}"
+                    )
+                normalized_devices.append(device)
+                claimed_devices[device] = name
+            assignments[name] = tuple(normalized_devices)
+        return assignments
+
     def _split_deployment_resource_pools(self, engine_entries, native_entries, base_config):
         """Split the selected parent pool between engine and native workers.
 
         Engine deployments reserve the number of bundles needed by their
-        rollout replicas. Native deployments share one subpool because each
-        reward-loop worker owns all configured native scorers; that subpool is
-        sized to ``reward.num_workers``. Any unrequested bundles are returned
-        as an unused trailing split so ``split_resource_pool`` receives the
-        complete parent-pool size it requires.
+        rollout replicas. Native deployments share one *parent* native
+        subpool, then bind individual deployments to the explicit bundle
+        indices in ``placement.devices``. Any unrequested bundles are
+        returned as an unused trailing split so ``split_resource_pool``
+        receives the complete parent-pool size it requires.
         """
         if not engine_entries and not native_entries:
             return {}, None
@@ -416,9 +485,10 @@ class MultiRewardModelManager:
 
         native_requested = 0
         if native_entries:
-            native_requested = int(self.config.reward.num_workers)
-            if native_requested <= 0:
-                raise ValueError("reward.num_workers must be positive for native reward deployments")
+            assignments = getattr(self, "native_device_assignments", None)
+            if assignments is None:
+                assignments = self._validate_native_device_assignments(native_entries)
+            native_requested = max(device for devices in assignments.values() for device in devices) + 1
 
         parent_world_size = self.resource_pool.world_size
         requested_total = sum(engine_requested_sizes) + native_requested

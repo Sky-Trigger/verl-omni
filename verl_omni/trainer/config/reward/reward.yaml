@@ -40,14 +40,19 @@ reward_functions: {}
 # model). Trainer selects one
 # parent global_pool or reward_pool through reward_model.enable_resource_pool;
 # MultiRewardModelManager splits that parent pool into disjoint engine and
-# native subpools. Native deployments share one subpool sized to
-# reward.num_workers because each worker owns all configured native scorers.
+# native subpools. Native deployments share one parent native subpool, but
+# each deployment must explicitly claim its own native-pool bundle indices.
+# One index creates one full local model instance; this is replication, not TP.
+# The indices are relative to the native subpool (not physical CUDA/NPU IDs),
+# and cannot overlap between native deployments.
 # Native PickScore example:
 #
 # deployments:
 #   pickscore_native:
 #     backend: native
 #     model_path: yuvalkirstain/PickScore_v1
+#     placement:
+#       devices: [0, 1, 2, 3]
 #     executor:
 #       scorer: verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeScorer
 # Engine PickScore example (requires a vLLM pooling endpoint compatible with

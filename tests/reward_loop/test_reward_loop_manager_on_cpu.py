@@ -61,6 +61,18 @@ def _build_workers(num_workers, resource_pool):
     )
 
 
+def _build_selected_workers(bundle_indices, resource_pool, prefix="native_reward_loop_worker_pickscore"):
+    return worker_module.build_accelerator_reward_workers(
+        config=_config(99),
+        reward_loop_workers_class=_FakeActorClass(),
+        accelerator_resource_pool=resource_pool,
+        reward_router_address="router",
+        reward_executor_specs={"pickscore": "spec"},
+        bundle_indices=bundle_indices,
+        worker_name_prefix=prefix,
+    )
+
+
 def test_accelerator_reward_workers_use_distinct_resource_pool_bundles(monkeypatch):
     resource_pool = _FakeResourcePool()
     monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
@@ -122,3 +134,32 @@ def test_accelerator_reward_workers_respect_subpool_bundle_offset(monkeypatch):
         ("pg0", 3),
         ("pg1", 0),
     ]
+
+
+def test_accelerator_reward_workers_allow_explicit_native_bundle_indices(monkeypatch):
+    resource_pool = _FakeSubResourcePool()
+    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
+    monkeypatch.setattr(
+        worker_module,
+        "get_platform",
+        lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "PlacementGroupSchedulingStrategy",
+        lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
+    )
+
+    workers = _build_selected_workers([0, 2], resource_pool)
+
+    assert [worker.options["scheduling_strategy"] for worker in workers] == [("pg0", 2), ("pg1", 0)]
+    assert [worker.options["name"] for worker in workers] == [
+        "native_reward_loop_worker_pickscore_0",
+        "native_reward_loop_worker_pickscore_1",
+    ]
+    assert all(worker.args[1:] == ("router", {"pickscore": "spec"}) for worker in workers)
+
+
+def test_accelerator_reward_workers_reject_invalid_explicit_bundle_indices():
+    with pytest.raises(ValueError, match="bundle index 3 exceeds"):
+        _build_selected_workers([3], _FakeResourcePool())

@@ -5,12 +5,14 @@ set -x
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 model_name=${MODEL_PATH:-Qwen/Qwen-Image-Edit-2511}
-reward_function_path=${REWARD_FUNCTION_PATH:-pkg://verl_omni.utils.reward_score.pickscore_reward}
+pickscore_model_path=${PICKSCORE_MODEL_PATH:-yuvalkirstain/PickScore_v1}
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-8}
 ACTOR_SP=${ACTOR_SP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
-REWARD_WORKERS=${REWARD_WORKERS:-4}
+# Native-pool bundle indices. Each entry loads one complete PickScore model;
+# these are not physical CUDA IDs and are not tensor-parallel ranks.
+NATIVE_REWARD_DEVICES=${NATIVE_REWARD_DEVICES:-"[0,1,2,3]"}
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-8192}
 
@@ -75,10 +77,12 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=40 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
-    reward.num_workers=$REWARD_WORKERS \
     reward.reward_model.enable=False \
-    reward.custom_reward_function.path=$reward_function_path \
-    reward.custom_reward_function.name=compute_score_pickscore \
+    +reward.deployments.pickscore.backend=native \
+    +reward.deployments.pickscore.adapter=pickscore \
+    +reward.deployments.pickscore.model_path=$pickscore_model_path \
+    +reward.deployments.pickscore.placement.devices="$NATIVE_REWARD_DEVICES" \
+    +reward.reward_functions.pickscore.deployment=pickscore \
     trainer.logger='["console", "tensorboard", "wandb"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=qwen_image_edit_lora_pickscore \

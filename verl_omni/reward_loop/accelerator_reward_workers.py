@@ -29,6 +29,8 @@ def build_accelerator_reward_workers(
     accelerator_resource_pool,
     reward_router_address=None,
     reward_executor_specs=None,
+    bundle_indices=None,
+    worker_name_prefix="reward_loop_worker",
 ):
     """Create workers bound one-per-bundle in an existing accelerator pool."""
     if accelerator_resource_pool is None:
@@ -43,6 +45,8 @@ def build_accelerator_reward_workers(
     # accidentally schedule on the engine deployment's bundles.
     start_bundle_index = getattr(accelerator_resource_pool, "start_bundle_index", None)
     if start_bundle_index is None:
+        # Preserve the legacy round-robin node ordering for existing custom
+        # accelerator reward functions.
         bundles = [
             (placement_group, bundle_index)
             for bundle_index in range(max(accelerator_resource_pool.store))
@@ -50,13 +54,34 @@ def build_accelerator_reward_workers(
             if bundle_index < local_world_size
         ]
     else:
-        local_world_size = accelerator_resource_pool.store[0]
-        bundles = []
-        for flat_index in range(start_bundle_index, start_bundle_index + accelerator_resource_pool.world_size):
-            pg_index, bundle_index = divmod(flat_index, local_world_size)
-            bundles.append((placement_groups[pg_index], bundle_index))
+        # ``split_resource_pool`` numbers the parent pool contiguously by
+        # placement group, so map a native-subpool-relative index through that
+        # same order. This remains correct when nodes have unequal bundle
+        # counts (unlike the former divmod(store[0]) implementation).
+        all_bundles = [
+            (placement_group, bundle_index)
+            for placement_group, local_world_size in zip(placement_groups, accelerator_resource_pool.store, strict=True)
+            for bundle_index in range(local_world_size)
+        ]
+        bundles = all_bundles[start_bundle_index : start_bundle_index + accelerator_resource_pool.world_size]
 
-    num_workers = config.reward.num_workers
+    if bundle_indices is None:
+        num_workers = config.reward.num_workers
+        selected_bundles = bundles[:num_workers]
+    else:
+        if not bundle_indices:
+            raise ValueError("bundle_indices must be a non-empty list")
+        if any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in bundle_indices
+        ):
+            raise ValueError("bundle_indices must contain non-negative integers")
+        if len(set(bundle_indices)) != len(bundle_indices):
+            raise ValueError("bundle_indices must not contain duplicates")
+        if max(bundle_indices) >= len(bundles):
+            raise ValueError(f"bundle index {max(bundle_indices)} exceeds accelerator pool size ({len(bundles)})")
+        selected_bundles = [bundles[index] for index in bundle_indices]
+        num_workers = len(selected_bundles)
+
     if num_workers > len(bundles):
         raise ValueError(f"reward.num_workers ({num_workers}) exceeds accelerator pool size ({len(bundles)})")
 
@@ -64,11 +89,11 @@ def build_accelerator_reward_workers(
     return [
         reward_loop_workers_class.options(
             **accelerator_options,
-            name=f"reward_loop_worker_{worker_index}",
+            name=f"{worker_name_prefix}_{worker_index}",
             scheduling_strategy=PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
                 placement_group_bundle_index=bundle_index,
             ),
         ).remote(config, reward_router_address, reward_executor_specs or {})
-        for worker_index, (placement_group, bundle_index) in enumerate(bundles[:num_workers])
+        for worker_index, (placement_group, bundle_index) in enumerate(selected_bundles)
     ]
