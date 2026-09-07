@@ -334,7 +334,8 @@ Diffusion recipes compose `reward@reward: reward` (`verl_omni/trainer/config/rew
 
 - `reward.num_workers`: Parallel reward-manager workers.
 - `reward.custom_reward_function.path` / `name`: Single custom score function.
-- `reward.reward_functions`: Multi-reward dict (`{name: {path, name, weight}}`); mutually exclusive with `custom_reward_function`.
+- `reward.reward_functions`: Multi-reward dict (`{name: {path, name, weight}}`). A named engine deployment also requires `deployment`, `path`, and `name`; a named native deployment requires only `deployment`.
+- `reward.deployments`: Optional named `engine` and `native` model deployments. See {doc}`../algo/managed_reward_deployments` for lifecycle, pool, placement, and migration details.
 - `reward.aggregation`: Multi-reward aggregation (`weighted_sum` only).
 - `reward.reward_manager`: Defaults to `VisualRewardManager` from `pkg://verl_omni.reward_loop.reward_manager`.
 - `reward.reward_model.*`: Optional model-based RM (resource pool, rollout engine knobs). See {doc}`../algo/async_reward` and {doc}`../start/http_scorer`.
