@@ -15,7 +15,8 @@
 
 The upstream ``RewardModelManager`` remains the owner of one engine-backed
 reward model. ``MultiRewardModelManager`` owns the parent resource pool and
-splits it between those single-model managers; native models remain worker-local.
+splits it between those single-model managers; native models remain worker-local
+and receive the same manager-controlled wake/score/sleep lifecycle over RPC.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
+import ray
 import torch
 from omegaconf import OmegaConf
 from verl.experimental.reward_loop.reward_model import RewardModelManager
@@ -183,13 +185,27 @@ def _empty_accelerator_cache() -> None:
         empty_cache()
 
 
+def _resolve_deployment_offload(deployment) -> bool:
+    """Resolve the common lifecycle policy, accepting old engine knobs as aliases."""
+    explicit = deployment.get("offload")
+    rollout = _coerce_mapping(deployment.get("rollout"))
+    legacy_values = [rollout[key] for key in ("free_cache_engine", "enable_sleep_mode") if key in rollout]
+    values = ([explicit] if explicit is not None else []) + legacy_values
+    if any(not isinstance(value, bool) for value in values):
+        raise ValueError("Reward deployment offload must be a boolean")
+    if len(set(values)) > 1:
+        raise ValueError("Reward deployment offload conflicts with rollout sleep settings")
+    return values[0] if values else True
+
+
 def _prepare_engine_config(deployment, base_config, fallback_model=None):
     """Build the exact config expected by upstream ``RewardModelManager``."""
+    offload = _resolve_deployment_offload(deployment)
     config = OmegaConf.merge(
         OmegaConf.create(_coerce_mapping(base_config)),
         OmegaConf.create(_coerce_mapping(deployment)),
     )
-    for key in ("backend", "executor", "name", "enable_resource_pool", "adapter"):
+    for key in ("backend", "executor", "name", "enable_resource_pool", "adapter", "offload"):
         if key in config:
             del config[key]
     config.enable = True
@@ -199,6 +215,8 @@ def _prepare_engine_config(deployment, base_config, fallback_model=None):
         raise ValueError("Engine reward deployment requires model_path")
     if config.get("rollout") is None:
         raise ValueError("Engine reward deployment requires rollout config")
+    config.rollout.free_cache_engine = offload
+    config.rollout.enable_sleep_mode = offload
     if OmegaConf.is_missing(config.rollout, "name") or config.rollout.get("name") == "???":
         config.rollout.name = "vllm"
     engine_kwargs = config.rollout.get("engine_kwargs") or {}
@@ -224,8 +242,9 @@ class RewardExecutorSpec:
 class RewardDeployment(ABC):
     """A model deployment with an explicit wake/score/sleep lifecycle."""
 
-    def __init__(self, spec: RewardExecutorSpec):
+    def __init__(self, spec: RewardExecutorSpec, offload: bool):
         self.spec = spec
+        self.offload = offload
 
     @property
     def name(self) -> str:
@@ -248,6 +267,7 @@ class EngineRewardDeployment(RewardDeployment):
     """Engine deployment owned by the existing ``verl.RewardModelManager``."""
 
     def __init__(self, name: str, deployment, base_config, resource_pool, fallback_model=None):
+        offload = _resolve_deployment_offload(deployment)
         config = _prepare_engine_config(deployment, base_config, fallback_model)
         executor_config = _coerce_mapping(deployment.get("executor"))
         self.reward_model_manager = RewardModelManager(config, resource_pool)
@@ -261,20 +281,24 @@ class EngineRewardDeployment(RewardDeployment):
                     **executor_config,
                     "adapter": deployment.get("adapter") or executor_config.get("adapter"),
                 },
-            )
+            ),
+            offload=offload,
         )
 
     def wake_up(self) -> None:
-        self.reward_model_manager.wake_up()
+        if self.offload:
+            self.reward_model_manager.wake_up()
 
     def sleep(self) -> None:
-        self.reward_model_manager.sleep()
+        if self.offload:
+            self.reward_model_manager.sleep()
 
 
 class NativeRewardDeployment(RewardDeployment):
     """Native model state that is owned by every accelerator reward worker."""
 
     def __init__(self, name: str, deployment):
+        offload = _resolve_deployment_offload(deployment)
         executor_config = _coerce_mapping(deployment.get("executor"))
         model = executor_config.get("model")
         adapter = deployment.get("adapter") or executor_config.get("adapter")
@@ -290,14 +314,32 @@ class NativeRewardDeployment(RewardDeployment):
                 model_path=deployment.get("model_path"),
                 router_address=None,
                 executor_config=executor_config,
-            )
+            ),
+            offload=offload,
         )
+        self._workers = None
+        self._resident = False
+
+    def bind_workers(self, workers) -> None:
+        """Bind the worker-local model owners used by this deployment."""
+        self._workers = list(workers)
+
+    def _run_worker_lifecycle(self, method: str) -> None:
+        if self._workers is None:
+            raise RuntimeError(f"Native reward deployment {self.name!r} has no bound workers")
+        ray.get([getattr(worker, method).remote(self.name) for worker in self._workers])
 
     def wake_up(self) -> None:
-        return None
+        if not self.offload and self._resident:
+            return
+        self._run_worker_lifecycle("wake_up_reward_model")
+        self._resident = True
 
     def sleep(self) -> None:
-        return None
+        if not self.offload:
+            return
+        self._run_worker_lifecycle("sleep_reward_model")
+        self._resident = False
 
 
 class MultiRewardModelManager:
@@ -509,6 +551,12 @@ class MultiRewardModelManager:
         except KeyError as exc:
             raise ValueError(f"Unknown reward deployment {name!r}") from exc
 
+    def bind_native_workers(self, name: str, workers) -> None:
+        deployment = self.deployments.get(name)
+        if not isinstance(deployment, NativeRewardDeployment):
+            raise ValueError(f"Reward deployment {name!r} is not a native deployment")
+        deployment.bind_workers(workers)
+
     def wake_up(self) -> None:
         for deployment in self.deployments.values():
             deployment.wake_up()
@@ -608,15 +656,10 @@ class NativeRewardExecutor:
     async def infer(self, *args, **kwargs):
         """Run model inference while protecting its wake/sleep lifecycle."""
         async with self._lock:
+            if self._model is None:
+                raise RuntimeError(f"Native reward deployment {self.spec.name!r} is not awake")
             self._inflight += 1
             self._idle.clear()
-            try:
-                await self._wake_up_locked()
-            except BaseException:
-                self._inflight -= 1
-                if self._inflight == 0:
-                    self._idle.set()
-                raise
         try:
             model = self._model
             infer_fn = getattr(model, "infer", None)

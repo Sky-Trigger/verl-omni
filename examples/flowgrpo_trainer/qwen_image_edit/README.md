@@ -140,10 +140,18 @@ Set `TRAIN_FILES` and `VAL_FILES` to use different parquet files.
 | `MAX_PROMPT_LENGTH` | `8192` | Token and prompt-embedding length limit. |
 | `PICKSCORE_MODEL_PATH` | `yuvalkirstain/PickScore_v1` | PickScore checkpoint for the native deployment. |
 | `NATIVE_REWARD_DEVICES` | `[0,1,2,3]` (CUDA) / `[0,...,15]` (NPU) | Native-subpool bundle indices; one full PickScore instance per entry. |
+| `REWARD_OFFLOAD` | `true` | `true` wakes/sleeps around scoring; `false` keeps the deployment resident. The meaning is identical for engine and native deployments. |
 
 The launcher configures `reward.deployments.pickscore.backend=native` and
 binds `reward.reward_functions.pickscore` to that deployment. Native workers
 preserve the PickScore model's local inference queue; they are not TP shards.
+The PickScore-specific processor is selected inside
+`verl_omni.utils.reward_score.pickscore_reward`, so deployments only provide
+the reward model path.
+
+See [Managed Multi-Reward Deployments](../../../docs/algo/managed_reward_deployments.md)
+for complete native-only and engine-only configurations, mixed deployment
+resource placement, lifecycle settings, and a legacy-engine migration example.
 
 Additional Hydra overrides can be appended to the command:
 

@@ -52,7 +52,6 @@ class OmniRewardLoopWorker(RewardLoopWorker):
         self.native_reward_executors: dict[str, NativeRewardExecutor] = build_native_reward_executors(
             self.reward_executor_specs
         )
-        self._native_batch_active = False
         super().__init__(config, reward_router_address)
 
     def _init_reward_fn(self):
@@ -63,25 +62,19 @@ class OmniRewardLoopWorker(RewardLoopWorker):
                 self.native_reward_executors,
             )
 
-    async def compute_score_batch(self, data):
-        self._native_batch_active = True
+    async def wake_up_reward_model(self, deployment_name: str) -> None:
         try:
-            return await super().compute_score_batch(data)
-        finally:
-            self._native_batch_active = False
-            await self._sleep_native_reward_executors()
+            executor = self.native_reward_executors[deployment_name]
+        except KeyError as exc:
+            raise ValueError(f"Worker has no native reward deployment {deployment_name!r}") from exc
+        await executor.wake_up()
 
-    async def compute_score(self, data):
-        # Streaming agent loops submit one item at a time rather than calling
-        # ``compute_score_batch``.  Keep native models bounded to that request
-        # in this path; otherwise a worker-local CLIP would stay resident into
-        # the subsequent actor backward phase.
-        if not self.native_reward_executors or self._native_batch_active:
-            return await super().compute_score(data)
+    async def sleep_reward_model(self, deployment_name: str) -> None:
         try:
-            return await super().compute_score(data)
-        finally:
-            await self._sleep_native_reward_executors()
+            executor = self.native_reward_executors[deployment_name]
+        except KeyError as exc:
+            raise ValueError(f"Worker has no native reward deployment {deployment_name!r}") from exc
+        await executor.sleep()
 
     async def close(self):
         await self._sleep_native_reward_executors()
@@ -179,6 +172,7 @@ class OmniRewardLoopManager(RewardLoopManager):
                     f"native_reward_loop_worker_{deployment_name}",
                 )
                 self._register_worker_group(deployment_name, workers, group_config)
+                self.multi_reward_model_manager.bind_native_workers(deployment_name, workers)
 
             if not self._reward_worker_groups:
                 raise ValueError("reward.deployments produced no reward worker groups")
@@ -257,8 +251,8 @@ class OmniRewardLoopManager(RewardLoopManager):
         )
 
     def compute_rm_score(self, data):
-        self.multi_reward_model_manager.wake_up()
         try:
+            self.multi_reward_model_manager.wake_up()
             if not getattr(self, "_reward_worker_groups", None) or len(self._reward_worker_groups) <= 1:
                 return super().compute_rm_score(data)
             return self._compute_named_deployment_scores(data)

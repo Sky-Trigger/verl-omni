@@ -122,8 +122,17 @@ class _FakeInferencer:
 @pytest.mark.asyncio
 async def test_native_model_batches_inference_and_closes_instance_consumer(monkeypatch):
     inferencer = _FakeInferencer()
-    monkeypatch.setattr(pickscore_reward, "_PickScoreInferencer", lambda **kwargs: inferencer)
+    init_kwargs = {}
+
+    def build_inferencer(**kwargs):
+        init_kwargs.update(kwargs)
+        return inferencer
+
+    monkeypatch.setattr(pickscore_reward, "_PickScoreInferencer", build_inferencer)
     model = pickscore_reward.PickScoreNativeModel(model_path="/models/pickscore", device="cpu")
+
+    assert init_kwargs["model_path"] == "/models/pickscore"
+    assert init_kwargs["processor_path"] == pickscore_reward._PROCESSOR_PATH
 
     result_batches = await asyncio.gather(
         *(model.infer(["shared prompt"], [Image.new("L", (1, 1), index)]) for index in range(4))

@@ -7,14 +7,14 @@ export VLLM_ASCEND_ENABLE_NZ=0
 export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 model_name=${MODEL_PATH:-Qwen/Qwen-Image-Edit-2511}
 pickscore_model_path=${PICKSCORE_MODEL_PATH:-yuvalkirstain/PickScore_v1}
-pickscore_processor_path=${PICKSCORE_PROCESSOR_PATH:-$pickscore_model_path}
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 ENGINE_REWARD_NPUS=${ENGINE_REWARD_NPUS:-8}
-# Native-pool bundle indices. These are relative to the eight-bundle native
-# subpool, not physical NPU IDs or tensor-parallel ranks.
+# Native-pool bundle indices. These are relative to the native subpool, not
+# physical NPU IDs or tensor-parallel ranks.
 NATIVE_REWARD_DEVICES=${NATIVE_REWARD_DEVICES:-"[0,1,2,3,4,5,6,7]"}
+REWARD_OFFLOAD=${REWARD_OFFLOAD:-true}
 PICKSCORE_LOGIT_SCALE=${PICKSCORE_LOGIT_SCALE:-98.86447}
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
@@ -90,6 +90,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     reward.reward_model.enable=False \
     reward.reward_model.enable_resource_pool=False \
     +reward.deployments.pickscore_engine.backend=engine \
+    +reward.deployments.pickscore_engine.offload=$REWARD_OFFLOAD \
     +reward.deployments.pickscore_engine.model_path=$pickscore_model_path \
     +reward.deployments.pickscore_engine.n_gpus_per_node=$ENGINE_REWARD_NPUS \
     +reward.deployments.pickscore_engine.nnodes=1 \
@@ -104,10 +105,10 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     +reward.deployments.pickscore_engine.rollout.enforce_eager=True \
     +reward.deployments.pickscore_engine.rollout.engine_kwargs.vllm.runner=pooling \
     +reward.deployments.pickscore_native.backend=native \
+    +reward.deployments.pickscore_native.offload=$REWARD_OFFLOAD \
     +reward.deployments.pickscore_native.adapter=pickscore \
     +reward.deployments.pickscore_native.model_path=$pickscore_model_path \
     +reward.deployments.pickscore_native.placement.devices="$NATIVE_REWARD_DEVICES" \
-    +reward.deployments.pickscore_native.executor.kwargs.processor_path=$pickscore_processor_path \
     +reward.reward_functions.pickscore_engine.deployment=pickscore_engine \
     +reward.reward_functions.pickscore_engine.path=pkg://verl_omni.utils.reward_score.pickscore_reward \
     +reward.reward_functions.pickscore_engine.name=compute_score_pickscore_engine \

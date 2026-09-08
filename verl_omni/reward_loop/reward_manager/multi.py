@@ -70,7 +70,7 @@ class MultiVisualRewardManager(VisualRewardManager):
 
         self._sub_rewards = []
         total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight", "deployment"}
+        _reserved_keys = {"path", "name", "weight", "required", "deployment"}
         for key, entry in reward_functions_cfg.items():
             deployment = entry.get("deployment")
             path = entry.get("path")
@@ -82,9 +82,19 @@ class MultiVisualRewardManager(VisualRewardManager):
             if deployment is not None and path is None:
                 raise ValueError(f"Deployment-backed reward function {key!r} requires path/name")
             weight = float(entry.get("weight", 1.0))
+            required_value = entry.get("required", False)
+            if isinstance(required_value, str):
+                normalized = required_value.lower()
+                if normalized not in {"true", "false"}:
+                    raise ValueError(f"Invalid required value: {required_value!r}")
+                required = normalized == "true"
+            elif isinstance(required_value, bool):
+                required = required_value
+            else:
+                raise TypeError(f"required must be a boolean, got {type(required_value).__name__}")
             total_weight += weight
 
-            # Collect extra config fields (beyond path/name/weight) to pass to compute_score
+            # Collect non-manager fields to pass to compute_score.
             extra_args = {k: v for k, v in entry.items() if k not in _reserved_keys}
 
             fn = load_extern_object(path, name) if path is not None else None
@@ -96,6 +106,7 @@ class MultiVisualRewardManager(VisualRewardManager):
                     "key": key,
                     "fn": fn,
                     "weight": weight,
+                    "required": required,
                     "sig": sig,
                     "is_async": is_async,
                     "extra_args": extra_args,
@@ -103,10 +114,11 @@ class MultiVisualRewardManager(VisualRewardManager):
                 }
             )
             logger.info(
-                "Loaded sub-reward '%s': %s (weight=%s, async=%s)",
+                "Loaded sub-reward '%s': %s (weight=%s, required=%s, async=%s)",
                 key,
                 deployment or f"{path}:{name}",
                 weight,
+                required,
                 is_async,
             )
 
@@ -164,6 +176,7 @@ class MultiVisualRewardManager(VisualRewardManager):
             key = sub["key"]
             fn = sub["fn"]
             weight = sub["weight"]
+            required = sub["required"]
             sig = sub["sig"]
             is_async = sub["is_async"]
             extra_args = sub["extra_args"]
@@ -183,23 +196,31 @@ class MultiVisualRewardManager(VisualRewardManager):
                 if reward_kwargs is None:
                     raise RuntimeError(f"Reward deployment {deployment!r} cannot be used with a reward function")
                 filtered_kwargs = _filter_kwargs({**sub_kwargs, **reward_kwargs()}, sig)
+
+            try:
                 if is_async:
                     result = await fn(**filtered_kwargs)
                 else:
                     result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
-            elif is_async:
-                result = await fn(**filtered_kwargs)
-            else:
-                result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
 
-            if isinstance(result, dict):
-                score = float(result["score"])
-                for rk, rv in result.items():
-                    if rk == "score":
-                        continue
-                    reward_extra_info[f"reward/{key}/{rk}"] = rv
-            else:
-                score = float(result)
+                if isinstance(result, dict):
+                    score = float(result["score"])
+                    for rk, rv in result.items():
+                        if rk == "score":
+                            continue
+                        reward_extra_info[f"reward/{key}/{rk}"] = rv
+                else:
+                    score = float(result)
+            except Exception as e:
+                if required:
+                    raise RuntimeError(f"Required sub-reward '{key}' failed: {e}") from e
+                logger.exception(
+                    "Sub-reward '%s' raised an exception: %s. Contributing 0 to weighted sum.",
+                    key,
+                    e,
+                )
+                reward_extra_info[f"reward/{key}/errors"] = 1
+                score = 0.0
 
             reward_extra_info[f"reward/{key}"] = score
             combined_score += weight * score

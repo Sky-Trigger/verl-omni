@@ -1,6 +1,6 @@
 # Managed Multi-Reward Deployments
 
-Last updated: 09/07/2026
+Last updated: 09/09/2026
 
 `reward.deployments` manages multiple model-backed rewards in one training
 job. It keeps model lifecycle and resource ownership separate from reward
@@ -52,10 +52,10 @@ Trainer
                  -> verl.RewardModelManager
                       -> router + vLLM/vLLM-Omni replicas + wake/sleep
             -> NativeRewardDeployment[name]
-                 -> native worker specification
+                 -> native workers + wake/sleep RPC
        -> reward-loop workers
             -> EngineRewardExecutor[name]: router address + model name
-            -> NativeRewardExecutor[name]: load -> infer -> sleep
+            -> NativeRewardExecutor[name]: wake/load -> infer -> optional sleep
        -> MultiVisualRewardManager
             -> reward functions
             -> final_reward = sum(weight * term_score)
@@ -63,6 +63,34 @@ Trainer
 
 `MultiVisualRewardManager` is an aggregator, not a third model backend. The
 model backends are `engine` and `native`.
+
+Every deployment accepts the same `offload` lifecycle setting:
+
+```yaml
+offload: true   # wake before scoring and sleep after scoring (default)
+offload: false  # keep the model resident between scoring phases
+```
+
+For an engine deployment this controls vLLM/vLLM-Omni sleep mode. For a
+native deployment, `false` loads the Transformers or third-party model on its
+first scoring phase and keeps that worker-local model alive. The trainer always
+uses the same deployment `wake_up()` / `sleep()` contract and does not branch
+on the backend.
+
+Keeping a deployment resident requires enough accelerator memory for it to
+coexist with the actor rollout. When deployments share `global_pool`, prefer
+the default `offload: true` unless the combined resident footprint is known to
+fit; otherwise use a separate reward pool.
+
+Choose one backend for a normal single-model reward job:
+
+- use `engine` when vLLM or vLLM-Omni can serve the model and the configured
+  reward function can consume its API response;
+- use `native` when the engine does not support the model or inference needs a
+  Transformers or third-party implementation;
+- configure both only when the job genuinely needs multiple model-backed
+  reward terms, or when comparing the two inference paths. Running the same
+  model through both backends normally duplicates inference work.
 
 | Backend | Model owner | Use it when | Scoring contract |
 | --- | --- | --- | --- |
@@ -84,20 +112,26 @@ reward.reward_model.enable_resource_pool=false -> global_pool
 reward.reward_model.enable_resource_pool=true  -> reward_pool
 ```
 
-With named deployments, `MultiRewardModelManager` partitions that selected
-parent pool into:
+With named deployments, `MultiRewardModelManager` gives every deployment a
+disjoint allocation from that selected parent pool:
 
 ```text
 parent pool
-  -> one disjoint subpool for every engine deployment
-  -> one native parent subpool
-       -> explicitly assigned native worker bundles
+  -> engine deployment A allocation
+  -> engine deployment B allocation
+  -> native deployment C allocation
+  -> native deployment D allocation
 ```
 
 An engine deployment reserves
 `replicas * tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`
 bundles, or the explicit `n_gpus_per_node * nnodes` allocation when set. Its
 engine owns TP, DP, PP, batching, and scheduling.
+
+Internally, every engine allocation is a dedicated `SubRayResourcePool`.
+Native allocations are logically at the same level and cannot overlap,
+although the implementation maps all native allocations through one internal
+native subpool and then selects each deployment's bundles.
 
 `placement.devices` for a native deployment means **bundle indices inside the
 native subpool**, not host-global CUDA/NPU indices and not TP ranks. Every
@@ -114,6 +148,42 @@ placement:
 creates four full replicas on the first four native bundles. It does not shard
 one model over four devices. Native tensor parallelism is not supported.
 
+Resource-pool splitting is ordered. Engine allocations are taken first in
+deployment configuration order. The internal native subpool comes next and is
+large enough to include its highest configured native bundle index. Any
+remaining parent bundles form a trailing allocation unused by named reward
+deployments.
+
+For example, on a one-node 16-bundle parent pool:
+
+```bash
+ENGINE_REWARD_NPUS=4
+NATIVE_REWARD_DEVICES="[0,1,2,3]"
+```
+
+produces:
+
+```text
+parent bundles 0-3   -> engine reward allocation
+parent bundles 4-7   -> native subpool
+  native indices 0-3 -> parent bundles 4-7
+parent bundles 8-15  -> unused by named reward deployments
+```
+
+The native indices above therefore do not select physical NPU 0-3. On a
+single node with an unchanged visible-device order, Ray will commonly map the
+first two allocations to physical devices 0-3 and 4-7, respectively, but code
+must not rely on that physical numbering. Ray and
+`ASCEND_RT_VISIBLE_DEVICES`/`CUDA_VISIBLE_DEVICES` determine the final
+worker-visible device mapping.
+
+When `enable_resource_pool=false`, the parent is `global_pool`. The
+actor/rollout still occupies all 16 bundles in this example; reward deployments
+are colocated on their eight assigned bundles and use lifecycle offloading to
+share those devices. Bundles 8-15 are unused only by named reward deployments,
+not by the actor/rollout. With `enable_resource_pool=true`, the same split is
+instead applied to the dedicated `reward_pool`.
+
 ## Configuration contract
 
 Every named reward term uses:
@@ -126,6 +196,7 @@ reward:
       path: pkg://my_package.reward
       name: compute_score
       weight: 1.0
+      required: true
 ```
 
 The final score is not normalized by total weight:
@@ -134,7 +205,16 @@ The final score is not normalized by total weight:
 final_reward = sum(term.weight * term.score)
 ```
 
-The default weight is `1.0`.
+The default weight is `1.0`. `required` retains the existing
+multi-reward failure policy:
+
+- `required: true`: propagate a scoring failure as fatal and stop the
+  training step.
+- `required: false` or omitted: record the error and let that term contribute
+  zero to the weighted sum.
+
+`required` controls failure handling only. It is not passed to the configured
+reward function and does not change model inference or score calculation.
 
 ### Native deployment
 
@@ -148,13 +228,11 @@ It may select a built-in adapter or an explicit native model class:
 deployments:
   pickscore_native:
     backend: native
+    offload: true
     adapter: pickscore
     model_path: /models/PickScore_v1
     placement:
       devices: [0, 1, 2, 3]
-    executor:
-      kwargs:
-        processor_path: /models/PickScore_v1
 
   custom_native:
     backend: native
@@ -171,7 +249,9 @@ deployments:
 `verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel`. Native
 PickScore preserves the existing local burst batching policy. The native
 executor waits for active inference before closing the model and clearing the
-accelerator cache.
+accelerator cache. PickScore-specific construction details such as its CLIP
+processor stay in `verl_omni.utils.reward_score.pickscore_reward`; the
+deployment supplies only the reward model path.
 
 The native executor exposes only an `infer()` handle. Native terms must set
 `path` and `name`; that reward function consumes the model output and owns all
@@ -186,6 +266,7 @@ configuration. Every engine term must set `deployment`, `path`, and `name`:
 deployments:
   ocr:
     backend: engine
+    offload: true
     model_path: Qwen/Qwen3-VL-8B-Instruct
     n_gpus_per_node: 2
     nnodes: 1
@@ -230,9 +311,6 @@ reward:
       model_path: /models/PickScore_v1
       placement:
         devices: [0, 1, 2, 3]
-      executor:
-        kwargs:
-          processor_path: /models/PickScore_v1
   reward_functions:
     pickscore:
       deployment: pickscore
@@ -267,6 +345,9 @@ reward:
         max_num_seqs: 8
         limit_images: 1
         enforce_eager: true
+        # Example budget for a small pooling model. Tune for the hardware and
+        # model instead of copying this value blindly.
+        gpu_memory_utilization: 0.1
         engine_kwargs:
           vllm:
             runner: pooling
@@ -290,6 +371,15 @@ The configured `logit_scale` is the already-exponentiated checkpoint value.
 Do not apply `exp()` to it again. A model path alone is not enough: a new
 engine-backed model also needs a reward function that defines how to turn that
 model's API response into a score.
+
+`rollout.gpu_memory_utilization` is the engine's requested accelerator-memory
+budget, not the checkpoint size. vLLM may use the budget remaining after model
+weights and profiling for cache allocation. For example, `0.5` requests about
+32.5 GiB on a 65 GiB device even if the checkpoint weights are only 4 GiB.
+This matters most with `offload: false`, because that engine allocation remains
+resident while the actor rollout uses the same device. Lower the value only as
+far as the reward model, its activation peak, and its required cache capacity
+permit. `0.1` above is a PickScore-oriented example, not a universal default.
 
 ### One engine and one native model
 
@@ -317,9 +407,6 @@ reward:
       model_path: /models/PickScore_v1
       placement:
         devices: [0, 1, 2, 3, 4, 5, 6, 7]
-      executor:
-        kwargs:
-          processor_path: /models/PickScore_v1
   reward_functions:
     ocr:
       deployment: ocr
@@ -338,28 +425,40 @@ The provided NPU launcher
 is a standalone Qwen-Image-Edit test recipe with this resource shape. It keeps
 the base training parameters unchanged, creates eight engine bundles with
 TP=1, and assigns eight native PickScore replicas. Set
-`PICKSCORE_MODEL_PATH` and, when required, `PICKSCORE_PROCESSOR_PATH` to local
-checkpoint paths before launching it.
+`PICKSCORE_MODEL_PATH` to a local checkpoint path when running offline. The
+script is a multi-deployment configuration and parity example, not a
+recommendation to score every production sample through PickScore twice.
 
 ## Runtime flow
 
 For each reward batch:
 
 ```text
-1. wake every engine deployment
+1. wake every deployment; native models load in their assigned workers
 2. score rule and engine terms in the shared reward worker group
 3. score each native deployment in its assigned worker group
 4. merge per-term scores and emit one reward/combined value
-5. sleep engine deployments
-6. native executors close models after their batch and release cache
+5. call `sleep` on every deployment in reverse order
 ```
+
+With `offload: true`, engine deployments release their managed model/cache
+memory and native executors close their model objects after scoring. With
+`offload: false`, those sleep calls are intentional no-ops and the models stay
+resident. Engine services are created eagerly during deployment setup; native
+model objects are created in their Ray workers on the first wake so device
+binding is correct. This bootstrap difference does not change the common
+steady-state `offload` contract.
 
 Named deployment jobs use ordinary batch reward computation. The existing
 streaming reward interface accepts only one worker list and cannot safely fan a
 streaming request across independent native worker groups.
 
-Errors are fail-fast: a reward-loading or scoring exception aborts the training
-step. No named reward term silently becomes a zero score.
+Each term keeps its configured `required` failure policy. A required term
+propagates a reward-function or model-inference failure and stops the training
+step. An optional term records `reward/<term>/errors=1` and contributes zero.
+Deployment setup and lifecycle errors, such as an unknown deployment, missing
+executor, or model wake/load failure, remain fatal because no individual term
+can safely recover from them.
 
 ## Migrate an existing configuration
 
@@ -379,6 +478,56 @@ To migrate a legacy engine-backed OCR reward:
 4. Set the reward-manager configuration to `MultiVisualRewardManager` only
    when the recipe does not already select it; named deployments do this during
    reward-loop initialization.
+
+For example, migrate this legacy engine configuration:
+
+```yaml
+reward:
+  reward_model:
+    enable: true
+    enable_resource_pool: false
+    model_path: Qwen/Qwen3-VL-8B-Instruct
+    rollout:
+      name: vllm
+      tensor_model_parallel_size: 2
+  custom_reward_function:
+    path: pkg://verl_omni.utils.reward_score.genrm_ocr
+    name: compute_score_ocr
+```
+
+to one named engine deployment and one explicitly bound reward term:
+
+```yaml
+reward:
+  reward_model:
+    enable: false
+    # This still selects global_pool. Set true for a dedicated reward_pool.
+    enable_resource_pool: false
+  deployments:
+    ocr:
+      backend: engine
+      offload: true
+      model_path: Qwen/Qwen3-VL-8B-Instruct
+      n_gpus_per_node: 2
+      nnodes: 1
+      rollout:
+        name: vllm
+        tensor_model_parallel_size: 2
+        data_parallel_size: 1
+        pipeline_model_parallel_size: 1
+  reward_functions:
+    ocr:
+      deployment: ocr
+      path: pkg://verl_omni.utils.reward_score.genrm_ocr
+      name: compute_score_ocr
+      weight: 1.0
+```
+
+`reward.num_workers` and unrelated trainer settings do not move during this
+migration. `reward.reward_model.enable_resource_pool` continues to select the
+parent resource pool even though `reward.reward_model.enable` is false. Do not
+copy model-specific request or scoring logic into the deployment: keep it in
+the configured reward function.
 
 To migrate a legacy local model, define `backend: native`, use a native model
 class or supported adapter, assign non-overlapping native placement bundle

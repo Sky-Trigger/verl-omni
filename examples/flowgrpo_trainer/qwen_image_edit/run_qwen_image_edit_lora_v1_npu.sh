@@ -6,13 +6,14 @@ set -x
 export VLLM_ASCEND_ENABLE_NZ=0
 export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 model_name=${MODEL_PATH:-Qwen/Qwen-Image-Edit-2511}
-pickscore_model_path=${PICKSCORE_MODEL_PATH:-yuvalkirstain/PickScore_v1}
+pickscore_model_path=${PICKSCORE_MODEL_PATH:?PICKSCORE_MODEL_PATH must be set}
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 # Native-pool bundle indices. Each entry loads one complete PickScore model;
 # these are not physical NPU IDs and are not tensor-parallel ranks.
 NATIVE_REWARD_DEVICES=${NATIVE_REWARD_DEVICES:-"[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]"}
+REWARD_OFFLOAD=${REWARD_OFFLOAD:-true}
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 
@@ -86,6 +87,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     reward.reward_model.enable=False \
     +reward.deployments.pickscore.backend=native \
+    +reward.deployments.pickscore.offload=$REWARD_OFFLOAD \
     +reward.deployments.pickscore.adapter=pickscore \
     +reward.deployments.pickscore.model_path=$pickscore_model_path \
     +reward.deployments.pickscore.placement.devices="$NATIVE_REWARD_DEVICES" \

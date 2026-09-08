@@ -133,12 +133,12 @@ class PickScoreNativeModel:
     remains responsible for computing PickScore.
     """
 
-    def __init__(self, model_path: str = _MODEL_PATH, device=None, dtype=torch.float32, processor_path=_PROCESSOR_PATH):
+    def __init__(self, model_path: str = _MODEL_PATH, device=None, dtype=torch.float32):
         self._inferencer = _PickScoreInferencer(
             device=device,
             dtype=dtype,
             model_path=model_path,
-            processor_path=processor_path,
+            processor_path=_PROCESSOR_PATH,
         )
         self._score_queue = asyncio.Queue()
         self._consumer_task = None

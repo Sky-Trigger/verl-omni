@@ -28,6 +28,7 @@ from verl.protocol import DataProto
 
 from verl_omni.reward_loop import deployment as deployment_module
 from verl_omni.reward_loop.deployment import (
+    EngineRewardDeployment,
     MultiRewardModelManager,
     NativeRewardDeployment,
     NativeRewardExecutor,
@@ -243,6 +244,73 @@ def test_native_pickscore_adapter_is_selected_by_default():
     assert deployment.executor_spec.model_path == "/models/pickscore"
 
 
+def test_native_deployment_delegates_lifecycle_to_bound_workers(monkeypatch):
+    calls = []
+
+    class _RemoteMethod:
+        def __init__(self, method):
+            self.method = method
+
+        def remote(self, deployment_name):
+            calls.append((self.method, deployment_name))
+            return None
+
+    workers = [
+        SimpleNamespace(
+            wake_up_reward_model=_RemoteMethod("wake"),
+            sleep_reward_model=_RemoteMethod("sleep"),
+        )
+        for _ in range(2)
+    ]
+    deployment = NativeRewardDeployment(
+        "pickscore",
+        OmegaConf.create({"backend": "native", "adapter": "pickscore", "model_path": "/models/pickscore"}),
+    )
+    deployment.bind_workers(workers)
+    monkeypatch.setattr(deployment_module.ray, "get", lambda refs: refs)
+
+    deployment.wake_up()
+    deployment.sleep()
+
+    assert calls == [
+        ("wake", "pickscore"),
+        ("wake", "pickscore"),
+        ("sleep", "pickscore"),
+        ("sleep", "pickscore"),
+    ]
+
+
+def test_native_deployment_can_stay_resident(monkeypatch):
+    calls = []
+
+    class _RemoteMethod:
+        def __init__(self, method):
+            self.method = method
+
+        def remote(self, deployment_name):
+            calls.append((self.method, deployment_name))
+            return None
+
+    worker = SimpleNamespace(
+        wake_up_reward_model=_RemoteMethod("wake"),
+        sleep_reward_model=_RemoteMethod("sleep"),
+    )
+    deployment = NativeRewardDeployment(
+        "pickscore",
+        OmegaConf.create(
+            {"backend": "native", "offload": False, "adapter": "pickscore", "model_path": "/models/pickscore"}
+        ),
+    )
+    deployment.bind_workers([worker])
+    monkeypatch.setattr(deployment_module.ray, "get", lambda refs: refs)
+
+    deployment.wake_up()
+    deployment.sleep()
+    deployment.wake_up()
+
+    assert calls == [("wake", "pickscore")]
+
+
 @pytest.mark.parametrize(
     ("deployments", "message"),
     [
@@ -381,8 +449,10 @@ def test_native_deployments_create_isolated_worker_groups(monkeypatch):
         deployments={"pickscore": object(), "hpsv3": object()},
         reward_executor_specs=specs,
         native_device_assignments={"pickscore": (0, 1), "hpsv3": (2, 3)},
+        bind_native_workers=lambda name, workers: observed_bindings.append((name, workers)),
     )
     observed = []
+    observed_bindings = []
 
     def create_native_workers(group_config, group_specs, bundle_indices, name_prefix):
         observed.append((group_config, group_specs, bundle_indices, name_prefix))
@@ -414,6 +484,10 @@ def test_native_deployments_create_isolated_worker_groups(monkeypatch):
         {"pickscore"},
         {"hpsv3"},
     ]
+    assert observed_bindings == [
+        ("pickscore", ["native_reward_loop_worker_pickscore-worker"]),
+        ("hpsv3", ["native_reward_loop_worker_hpsv3-worker"]),
+    ]
 
 
 def test_engine_config_fills_the_default_rollout_name():
@@ -425,7 +499,65 @@ def test_engine_config_fills_the_default_rollout_name():
 
     assert engine_config.enable is True
     assert engine_config.rollout.name == "vllm"
+    assert engine_config.rollout.free_cache_engine is True
+    assert engine_config.rollout.enable_sleep_mode is True
     assert "backend" not in engine_config
+
+
+def test_engine_offload_false_disables_vllm_sleep_mode():
+    config = _config()
+    engine_config = _prepare_engine_config(
+        OmegaConf.create({"backend": "engine", "offload": False, "model_path": "/models/clip"}),
+        config.reward.reward_model,
+    )
+
+    assert engine_config.rollout.free_cache_engine is False
+    assert engine_config.rollout.enable_sleep_mode is False
+    assert "offload" not in engine_config
+
+
+def test_engine_resident_deployment_skips_wake_and_sleep():
+    manager = SimpleNamespace(
+        wake_up=lambda: pytest.fail("unexpected wake"),
+        sleep=lambda: pytest.fail("unexpected sleep"),
+    )
+    deployment = object.__new__(EngineRewardDeployment)
+    deployment.offload = False
+    deployment.reward_model_manager = manager
+
+    deployment.wake_up()
+    deployment.sleep()
+
+
+@pytest.mark.parametrize("offload", ["true", 1, 0])
+def test_deployment_offload_must_be_boolean(offload):
+    with pytest.raises(ValueError, match="offload must be a boolean"):
+        NativeRewardDeployment(
+            "native",
+            OmegaConf.create(
+                {
+                    "backend": "native",
+                    "offload": offload,
+                    "executor": {"model": "tests.fake:Model"},
+                }
+            ),
+        )
+
+
+def test_engine_offload_rejects_conflicting_legacy_sleep_setting():
+    config = _config()
+    with pytest.raises(ValueError, match="conflicts with rollout sleep settings"):
+        _prepare_engine_config(
+            OmegaConf.create(
+                {
+                    "backend": "engine",
+                    "offload": False,
+                    "model_path": "/models/clip",
+                    "rollout": {"free_cache_engine": True},
+                }
+            ),
+            config.reward.reward_model,
+        )
 
 
 def test_pooling_engine_uses_pooling_safe_worker_extension():
@@ -583,6 +715,22 @@ async def test_native_executor_wakes_infers_and_sleeps(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_native_executor_rejects_inference_while_asleep():
+    executor = NativeRewardExecutor(
+        RewardExecutorSpec(
+            name="native",
+            backend="native",
+            model_path=None,
+            router_address=None,
+            executor_config={"model": "tests.fake:FakeModel"},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="is not awake"):
+        await executor.infer(["prompt"], [torch.zeros(3, 2, 2, dtype=torch.uint8)])
+
+
+@pytest.mark.asyncio
 async def test_native_executor_waits_for_inflight_score_before_sleep(monkeypatch):
     class _BlockingModel:
         release = False
@@ -615,6 +763,7 @@ async def test_native_executor_waits_for_inflight_score_before_sleep(monkeypatch
     monkeypatch.setattr(deployment_module, "get_device_name", lambda: "cpu")
     monkeypatch.setattr(deployment_module, "get_device_id", lambda: 0)
 
+    await executor.wake_up()
     infer_task = asyncio.create_task(executor.infer(["prompt"], [torch.zeros(3, 2, 2, dtype=torch.uint8)]))
     await asyncio.sleep(0.02)
     sleep_task = asyncio.create_task(executor.sleep())
@@ -662,6 +811,7 @@ async def test_native_executor_does_not_serialize_async_model_calls(monkeypatch)
     monkeypatch.setattr(deployment_module, "get_device_name", lambda: "cpu")
     monkeypatch.setattr(deployment_module, "get_device_id", lambda: 0)
 
+    await executor.wake_up()
     results = await asyncio.wait_for(
         asyncio.gather(
             executor.infer(["first"], [torch.zeros(3, 2, 2, dtype=torch.uint8)]),
@@ -677,21 +827,15 @@ async def test_native_executor_does_not_serialize_async_model_calls(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_streaming_worker_sleeps_native_models_after_one_request(monkeypatch):
+async def test_worker_exposes_native_model_lifecycle():
     worker = object.__new__(OmniRewardLoopWorker)
-    executor = SimpleNamespace(sleep=AsyncMock())
+    executor = SimpleNamespace(wake_up=AsyncMock(), sleep=AsyncMock())
     worker.native_reward_executors = {"native": executor}
-    worker._native_batch_active = False
 
-    async def compute_score(_self, data):
-        return {"reward_score": data}
+    await worker.wake_up_reward_model("native")
+    await worker.sleep_reward_model("native")
 
-    monkeypatch.setattr(
-        "verl.experimental.reward_loop.reward_loop.RewardLoopWorker.compute_score",
-        compute_score,
-    )
-
-    assert await worker.compute_score("streaming") == {"reward_score": "streaming"}
+    executor.wake_up.assert_awaited_once_with()
     executor.sleep.assert_awaited_once_with()
 
 
@@ -769,3 +913,18 @@ def test_named_deployment_groups_merge_scores_and_extra_info(monkeypatch):
     assert result.non_tensor_batch["reward/pickscore"].tolist() == [0.75, 1.0]
     assert result.non_tensor_batch["reward/combined"].tolist() == [1.0, 1.5]
     assert result.meta_info["reward_extra_keys"] == ["reward/ocr", "reward/pickscore", "reward/combined"]
+
+
+def test_compute_rm_score_brackets_scoring_with_one_lifecycle():
+    calls = []
+    manager = object.__new__(OmniRewardLoopManager)
+    manager.multi_reward_model_manager = SimpleNamespace(
+        wake_up=lambda: calls.append("wake_up"),
+        sleep=lambda: calls.append("sleep"),
+    )
+    manager._reward_worker_groups = {"engine": [object()], "native": [object()]}
+    manager._compute_named_deployment_scores = lambda data: calls.append("score") or data
+
+    data = object()
+    assert manager.compute_rm_score(data) is data
+    assert calls == ["wake_up", "score", "sleep"]

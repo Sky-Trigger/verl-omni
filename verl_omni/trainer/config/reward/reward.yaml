@@ -45,11 +45,14 @@ reward_functions: {}
 # One index creates one full local model instance; this is replication, not TP.
 # The indices are relative to the native subpool (not physical CUDA/NPU IDs),
 # and cannot overlap between native deployments.
+# Every backend uses the same optional ``offload`` setting: true (default)
+# wakes before scoring and sleeps afterward; false keeps the model resident.
 # Native PickScore example:
 #
 # deployments:
 #   pickscore_native:
 #     backend: native
+#     offload: true
 #     model_path: yuvalkirstain/PickScore_v1
 #     placement:
 #       devices: [0, 1, 2, 3]
@@ -59,6 +62,7 @@ reward_functions: {}
 # this checkpoint; verify embedding parity before using it for training):
 #   pickscore_engine:
 #     backend: engine
+#     offload: true
 #     n_gpus_per_node: 1
 #     nnodes: 1
 #     model_path: yuvalkirstain/PickScore_v1
