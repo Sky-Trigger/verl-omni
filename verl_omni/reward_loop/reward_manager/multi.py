@@ -19,6 +19,7 @@ import logging
 from verl import DataProto
 from verl.utils.import_utils import load_extern_object
 
+from ..reward_model_config import get_reward_model_entries, resolve_reward_model_name
 from .visual import VisualRewardManager, _validate_visual_response
 
 logger = logging.getLogger(__name__)
@@ -52,9 +53,8 @@ class MultiVisualRewardManager(VisualRewardManager):
     Each sub-reward function is called with filtered kwargs (based on its signature),
     and the final reward is a weighted sum of all sub-rewards.
 
-    A sub-reward may optionally set ``deployment``. Deployment-backed entries
-    still run their configured reward function; the selected executor only
-    supplies access to engine or native model inference.
+    A sub-reward may reference a named model. The selected executor supplies
+    inference access, while the configured reward function owns score semantics.
     """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
@@ -65,22 +65,23 @@ class MultiVisualRewardManager(VisualRewardManager):
         self._native_reward_executors = {}
 
         reward_functions_cfg = config.reward.reward_functions
+        reward_models_cfg = get_reward_model_entries(config)
         if not reward_functions_cfg:
             raise ValueError("MultiVisualRewardManager requires non-empty reward.reward_functions config")
 
         self._sub_rewards = []
         total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight", "required", "deployment"}
+        _reserved_keys = {"path", "name", "weight", "required", "model"}
         for key, entry in reward_functions_cfg.items():
-            deployment = entry.get("deployment")
+            model_name = resolve_reward_model_name(key, entry, reward_models_cfg)
             path = entry.get("path")
             name = entry.get("name")
             if (path is None) != (name is None):
                 raise ValueError(f"Reward function {key!r} must set both path and name")
-            if deployment is None and path is None:
-                raise ValueError(f"Reward function {key!r} requires either deployment or path/name")
-            if deployment is not None and path is None:
-                raise ValueError(f"Deployment-backed reward function {key!r} requires path/name")
+            if model_name is None and path is None:
+                raise ValueError(f"Reward function {key!r} requires path/name")
+            if model_name is not None and path is None:
+                raise ValueError(f"Model-backed reward function {key!r} requires path/name")
             weight = float(entry.get("weight", 1.0))
             required_value = entry.get("required", False)
             if isinstance(required_value, str):
@@ -110,13 +111,13 @@ class MultiVisualRewardManager(VisualRewardManager):
                     "sig": sig,
                     "is_async": is_async,
                     "extra_args": extra_args,
-                    "deployment": deployment,
+                    "model": model_name,
                 }
             )
             logger.info(
                 "Loaded sub-reward '%s': %s (weight=%s, required=%s, async=%s)",
                 key,
-                deployment or f"{path}:{name}",
+                model_name or f"{path}:{name}",
                 weight,
                 required,
                 is_async,
@@ -129,7 +130,7 @@ class MultiVisualRewardManager(VisualRewardManager):
             )
 
     def set_reward_executors(self, engine_reward_executors, native_reward_executors) -> None:
-        """Attach per-worker executors for configured engine/native deployments."""
+        """Attach per-worker executors for configured engine/native models."""
         self._engine_reward_executors = engine_reward_executors or {}
         self._native_reward_executors = native_reward_executors or {}
 
@@ -180,21 +181,21 @@ class MultiVisualRewardManager(VisualRewardManager):
             sig = sub["sig"]
             is_async = sub["is_async"]
             extra_args = sub["extra_args"]
-            deployment = sub["deployment"]
+            model_name = sub["model"]
 
             # Merge per-reward extra config fields into kwargs
             sub_kwargs = {**all_kwargs, **extra_args}
             filtered_kwargs = _filter_kwargs(sub_kwargs, sig) if sig is not None else {}
 
-            if deployment is not None:
-                executor = self._engine_reward_executors.get(deployment)
+            if model_name is not None:
+                executor = self._engine_reward_executors.get(model_name)
                 if executor is None:
-                    executor = self._native_reward_executors.get(deployment)
+                    executor = self._native_reward_executors.get(model_name)
                 if executor is None:
-                    raise RuntimeError(f"Reward deployment {deployment!r} is not available in this worker")
+                    raise RuntimeError(f"Reward model {model_name!r} is not available in this worker")
                 reward_kwargs = getattr(executor, "reward_kwargs", None)
                 if reward_kwargs is None:
-                    raise RuntimeError(f"Reward deployment {deployment!r} cannot be used with a reward function")
+                    raise RuntimeError(f"Reward model {model_name!r} cannot be used with a reward function")
                 filtered_kwargs = _filter_kwargs({**sub_kwargs, **reward_kwargs()}, sig)
 
             try:

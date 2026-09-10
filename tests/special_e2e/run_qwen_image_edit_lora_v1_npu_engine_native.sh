@@ -21,7 +21,7 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 
 ENGINE=vllm_omni
 
-WORKSPACE=${WORKSPACE:-$(cd "$(dirname "$0")/../../.." && pwd)}
+WORKSPACE=${WORKSPACE:-$(cd "$(dirname "$0")/../.." && pwd)}
 train_path=${TRAIN_FILES:-$WORKSPACE/data/qwen_image_edit/train.parquet}
 test_path=${VAL_FILES:-$WORKSPACE/data/qwen_image_edit/test.parquet}
 

@@ -13,6 +13,8 @@
 # limitations under the License.
 import asyncio
 import copy
+import inspect
+import logging
 
 import numpy as np
 import ray
@@ -23,17 +25,23 @@ from verl.experimental.reward_loop.reward_loop import RewardLoopWorker
 from verl.protocol import DataProto, pad_dataproto_to_divisor
 from verl.trainer.ppo.reward import resolve_reward_manager_cls
 
-from .deployment import (
-    EngineRewardExecutor,
-    MultiRewardModelManager,
-    NativeRewardExecutor,
+from .reward_model import MultiRewardModelManager
+from .reward_model_config import (
     accelerator_workers_enabled,
+    get_reward_model_entries,
+    has_reward_models,
+    resolve_reward_model_name,
+    streaming_reward_enabled,
+    validate_reward_model_terms,
+)
+from .reward_model_executor import (
+    EngineRewardExecutor,
+    NativeRewardExecutor,
     build_engine_reward_executors,
     build_native_reward_executors,
-    has_reward_deployments,
-    streaming_reward_enabled,
-    validate_reward_deployment_terms,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class OmniRewardLoopWorker(RewardLoopWorker):
@@ -43,14 +51,14 @@ class OmniRewardLoopWorker(RewardLoopWorker):
         self,
         config,
         reward_router_address=None,
-        reward_executor_specs=None,
+        reward_model_specs=None,
     ):
-        self.reward_executor_specs = reward_executor_specs or {}
+        self.reward_model_specs = reward_model_specs or {}
         self.engine_reward_executors: dict[str, EngineRewardExecutor] = build_engine_reward_executors(
-            self.reward_executor_specs
+            self.reward_model_specs
         )
         self.native_reward_executors: dict[str, NativeRewardExecutor] = build_native_reward_executors(
-            self.reward_executor_specs
+            self.reward_model_specs
         )
         super().__init__(config, reward_router_address)
 
@@ -62,18 +70,18 @@ class OmniRewardLoopWorker(RewardLoopWorker):
                 self.native_reward_executors,
             )
 
-    async def wake_up_reward_model(self, deployment_name: str) -> None:
+    async def wake_up_reward_model(self, model_name: str) -> None:
         try:
-            executor = self.native_reward_executors[deployment_name]
+            executor = self.native_reward_executors[model_name]
         except KeyError as exc:
-            raise ValueError(f"Worker has no native reward deployment {deployment_name!r}") from exc
+            raise ValueError(f"Worker has no native reward model {model_name!r}") from exc
         await executor.wake_up()
 
-    async def sleep_reward_model(self, deployment_name: str) -> None:
+    async def sleep_reward_model(self, model_name: str) -> None:
         try:
-            executor = self.native_reward_executors[deployment_name]
+            executor = self.native_reward_executors[model_name]
         except KeyError as exc:
-            raise ValueError(f"Worker has no native reward deployment {deployment_name!r}") from exc
+            raise ValueError(f"Worker has no native reward model {model_name!r}") from exc
         await executor.sleep()
 
     async def close(self):
@@ -96,27 +104,27 @@ class OmniRewardLoopManager(RewardLoopManager):
 
     def __init__(self, config, rm_resource_pool=None, accelerator_resource_pool=None):
         self.accelerator_resource_pool = accelerator_resource_pool
-        if has_reward_deployments(config):
-            validate_reward_deployment_terms(config)
+        if has_reward_models(config):
+            validate_reward_model_terms(config)
         self.multi_reward_model_manager = MultiRewardModelManager(
             config,
             # The trainer maps Role.RewardModel to global_pool or reward_pool.
-            # Each engine deployment receives a sub-pool from this one parent.
+            # Each named model receives a sub-pool from this one parent.
             resource_pool=rm_resource_pool,
         )
         use_accelerator_workers = accelerator_workers_enabled(config)
-        if self.multi_reward_model_manager.deployments or use_accelerator_workers:
+        if self.multi_reward_model_manager.models or use_accelerator_workers:
             if use_accelerator_workers and config.reward.reward_model.get("enable", False):
                 raise ValueError("Accelerator reward workers cannot be combined with reward.reward_model.enable=True")
             if config.reward.reward_model.get("enable", False):
                 raise ValueError(
-                    "Use reward.deployments for deployment-backed rewards; "
-                    "reward.reward_model.enable cannot be combined with reward.deployments."
+                    "Use reward.models for named model-backed rewards; "
+                    "reward.reward_model.enable cannot be combined with reward.models."
                 )
-            if self.multi_reward_model_manager.deployments and not config.reward.get("reward_functions"):
-                raise ValueError("reward.deployments requires non-empty reward.reward_functions")
+            if self.multi_reward_model_manager.models and not config.reward.get("reward_functions"):
+                raise ValueError("reward.models requires non-empty reward.reward_functions")
             self.config = config
-            if self.multi_reward_model_manager.deployments:
+            if self.multi_reward_model_manager.models:
                 with open_dict(config.reward.reward_manager):
                     config.reward.reward_manager.name = "MultiVisualRewardManager"
             self.reward_model_manager = None
@@ -135,19 +143,20 @@ class OmniRewardLoopManager(RewardLoopManager):
 
     def _init_reward_loop_workers(self):
         self.reward_loop_workers_class = ray.remote(OmniRewardLoopWorker)
-        specs = self.multi_reward_model_manager.reward_executor_specs
+        specs = self.multi_reward_model_manager.reward_model_specs
         self._reward_worker_groups = {}
         self._reward_worker_group_configs = {}
 
-        if self.multi_reward_model_manager.deployments:
+        if self.multi_reward_model_manager.models:
             entries = self.config.reward.reward_functions
+            models = get_reward_model_entries(self.config)
             native_names = {name for name, spec in specs.items() if spec.backend == "native"}
             terms_by_group = {}
             shared_terms = {}
             for term_name, term in entries.items():
-                deployment = term.get("deployment")
-                if deployment in native_names:
-                    terms_by_group.setdefault(deployment, {})[term_name] = term
+                model_name = resolve_reward_model_name(term_name, term, models)
+                if model_name in native_names:
+                    terms_by_group.setdefault(model_name, {})[term_name] = term
                 else:
                     shared_terms[term_name] = term
 
@@ -160,22 +169,22 @@ class OmniRewardLoopManager(RewardLoopManager):
                 )
                 self._register_worker_group("shared", workers, group_config)
 
-            for deployment_name, terms in terms_by_group.items():
-                placement = self.multi_reward_model_manager.native_device_assignments[deployment_name]
+            for model_name, terms in terms_by_group.items():
+                placement = self.multi_reward_model_manager.native_device_assignments[model_name]
                 group_config = self._copy_reward_config(terms)
                 with open_dict(group_config.reward):
                     group_config.reward.num_workers = len(placement)
                 workers = self._create_native_workers(
                     group_config,
-                    {deployment_name: specs[deployment_name]},
+                    {model_name: specs[model_name]},
                     placement,
-                    f"native_reward_loop_worker_{deployment_name}",
+                    f"native_reward_loop_worker_{model_name}",
                 )
-                self._register_worker_group(deployment_name, workers, group_config)
-                self.multi_reward_model_manager.bind_native_workers(deployment_name, workers)
+                self._register_worker_group(model_name, workers, group_config)
+                self.multi_reward_model_manager.bind_native_workers(model_name, workers)
 
             if not self._reward_worker_groups:
-                raise ValueError("reward.deployments produced no reward worker groups")
+                raise ValueError("reward.models produced no reward worker groups")
             self.reward_loop_workers = self._flatten_worker_groups()
             return
 
@@ -200,7 +209,7 @@ class OmniRewardLoopManager(RewardLoopManager):
                 reward_loop_workers_class=self.reward_loop_workers_class,
                 accelerator_resource_pool=accelerator_resource_pool,
                 reward_router_address=self.reward_router_address,
-                reward_executor_specs=specs,
+                reward_model_specs=specs,
             )
             self._register_worker_group("legacy", self.reward_loop_workers, self.config)
             return
@@ -239,35 +248,62 @@ class OmniRewardLoopManager(RewardLoopManager):
 
         resource_pool = self.multi_reward_model_manager.native_resource_pool
         if resource_pool is None:
-            raise ValueError("Native reward deployments require an allocated native resource pool")
+            raise ValueError("Native reward models require an allocated native resource pool")
         return build_accelerator_reward_workers(
             config=config,
             reward_loop_workers_class=self.reward_loop_workers_class,
             accelerator_resource_pool=resource_pool,
             reward_router_address=self.reward_router_address,
-            reward_executor_specs=specs,
+            reward_model_specs=specs,
             bundle_indices=list(bundle_indices),
             worker_name_prefix=name_prefix,
         )
 
     def compute_rm_score(self, data):
+        """Synchronous compatibility entrypoint for current trainers."""
+        if not self.multi_reward_model_manager.models:
+            return super().compute_rm_score(data)
         try:
-            self.multi_reward_model_manager.wake_up()
-            if not getattr(self, "_reward_worker_groups", None) or len(self._reward_worker_groups) <= 1:
-                return super().compute_rm_score(data)
-            return self._compute_named_deployment_scores(data)
-        finally:
-            self.multi_reward_model_manager.sleep()
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.async_compute_rm_score(data))
+        raise RuntimeError("compute_rm_score() cannot run inside an event loop; await async_compute_rm_score() instead")
 
-    def _compute_named_deployment_scores(self, data: DataProto) -> DataProto:
-        group_outputs = {}
+    async def async_compute_rm_score(self, data):
+        """Score named reward models without blocking the caller's event loop."""
+        if not self.multi_reward_model_manager.models:
+            return await asyncio.to_thread(super().compute_rm_score, data)
+        scoring_error = None
+        try:
+            await self.multi_reward_model_manager.wake_up()
+            return await self._compute_named_model_scores(data)
+        except BaseException as exc:
+            scoring_error = exc
+            raise
+        finally:
+            try:
+                await self.multi_reward_model_manager.sleep()
+            except Exception:
+                if scoring_error is None:
+                    raise
+                logger.exception("Failed to sleep reward models after scoring failed")
+
+    async def _compute_named_model_scores(self, data: DataProto) -> DataProto:
+        requests_by_group = {}
         for group_name, workers in self._reward_worker_groups.items():
             num_workers = len(workers)
             padded_data, pad_size = pad_dataproto_to_divisor(data, num_workers)
             chunks = padded_data.chunk(num_workers)
-            outputs = ray.get(
-                [worker.compute_score_batch.remote(chunk) for worker, chunk in zip(workers, chunks, strict=True)]
-            )
+            requests = [worker.compute_score_batch.remote(chunk) for worker, chunk in zip(workers, chunks, strict=True)]
+            requests_by_group[group_name] = (requests, pad_size)
+
+        all_requests = [request for requests, _ in requests_by_group.values() for request in requests]
+        all_outputs = await _gather_results(all_requests)
+        group_outputs = {}
+        offset = 0
+        for group_name, (requests, pad_size) in requests_by_group.items():
+            outputs = all_outputs[offset : offset + len(requests)]
+            offset += len(requests)
             flattened = [item for sublist in outputs for item in sublist]
             group_outputs[group_name] = flattened[: len(data)] if pad_size else flattened
 
@@ -316,3 +352,11 @@ class OmniRewardLoopManager(RewardLoopManager):
             await asyncio.gather(*[getattr(replica, method)(**kwargs) for replica in replicas])
 
         asyncio.run(run_all())
+
+
+async def _resolve_result(result):
+    return await result if inspect.isawaitable(result) else result
+
+
+async def _gather_results(results):
+    return await asyncio.gather(*(_resolve_result(result) for result in results))

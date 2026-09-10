@@ -14,8 +14,8 @@
 """Placement helper for reward workers that execute on local accelerators.
 
 This module deliberately owns no reward lifecycle or reward-manager policy.
-It just binds workers to bundles in a trainer-selected accelerator pool. Both
-native deployments and legacy custom reward functions use this same mechanism.
+It binds workers to bundles in a trainer-selected accelerator pool. Both
+native named models and existing custom reward functions use this mechanism.
 """
 
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -28,11 +28,28 @@ def build_accelerator_reward_workers(
     reward_loop_workers_class,
     accelerator_resource_pool,
     reward_router_address=None,
-    reward_executor_specs=None,
+    reward_model_specs=None,
     bundle_indices=None,
     worker_name_prefix="reward_loop_worker",
 ):
-    """Create workers bound one-per-bundle in an existing accelerator pool."""
+    """Create reward workers bound one-per-bundle in an accelerator pool.
+
+    Args:
+        config: Trainer configuration passed to every reward worker.
+        reward_loop_workers_class: Ray actor class used to create workers.
+        accelerator_resource_pool: Existing pool that owns placement groups.
+        reward_router_address: Optional engine router forwarded to workers.
+        reward_model_specs: Named model specs forwarded to workers.
+        bundle_indices: Optional pool-relative bundle indices. When omitted,
+            the first ``reward.num_workers`` bundles are selected.
+        worker_name_prefix: Prefix for Ray actor names.
+
+    Returns:
+        A list of Ray reward-worker actor handles.
+
+    Raises:
+        ValueError: If the pool or requested bundle indices are invalid.
+    """
     if accelerator_resource_pool is None:
         raise ValueError("Accelerator reward workers require an accelerator resource pool")
     if accelerator_resource_pool.max_colocate_count < 2:
@@ -41,8 +58,7 @@ def build_accelerator_reward_workers(
         )
     placement_groups = accelerator_resource_pool.get_placement_groups(device_name=get_device_name())
     # SubRayResourcePool keeps the original placement groups and records the
-    # flat bundle offset.  Respect that offset so a native subpool does not
-    # accidentally schedule on the engine deployment's bundles.
+    # flat bundle offset. Respect it when selecting from a native subpool.
     start_bundle_index = getattr(accelerator_resource_pool, "start_bundle_index", None)
     if start_bundle_index is None:
         # Preserve the legacy round-robin node ordering for existing custom
@@ -92,6 +108,6 @@ def build_accelerator_reward_workers(
                 placement_group=placement_group,
                 placement_group_bundle_index=bundle_index,
             ),
-        ).remote(config, reward_router_address, reward_executor_specs or {})
+        ).remote(config, reward_router_address, reward_model_specs or {})
         for worker_index, (placement_group, bundle_index) in enumerate(selected_bundles)
     ]

@@ -47,7 +47,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import LLMServerManager
 
-from verl_omni.reward_loop.deployment import reward_role_required, streaming_reward_enabled
+from verl_omni.reward_loop.reward_model_config import reward_role_required, streaming_reward_enabled
 from verl_omni.trainer.diffusion.v1.trainer_base import (
     PolicyGradientDiffusionTrainerV1,
     register_diffusion_trainer,

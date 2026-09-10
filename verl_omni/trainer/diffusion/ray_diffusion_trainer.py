@@ -54,7 +54,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
-from verl_omni.reward_loop.deployment import reward_is_enabled, reward_role_required, streaming_reward_enabled
+from verl_omni.reward_loop.reward_model_config import reward_is_enabled, reward_role_required, streaming_reward_enabled
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,

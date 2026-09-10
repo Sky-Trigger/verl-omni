@@ -25,7 +25,7 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
-from verl_omni.reward_loop.deployment import reward_pool_is_separate, reward_role_required
+from verl_omni.reward_loop.reward_model_config import reward_pool_is_separate, reward_role_required
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,

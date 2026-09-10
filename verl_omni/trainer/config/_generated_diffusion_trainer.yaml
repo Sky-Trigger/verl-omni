@@ -476,7 +476,7 @@ reward:
   accelerator_workers:
     enabled: false
   reward_functions: {}
-  deployments: {}
+  models: {}
   aggregation: weighted_sum
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig

@@ -78,7 +78,7 @@ async def reward_uses_native_model(reward_model, ground_truth, solution_image):
     return {"score": output["value"], "backend": "native-function"}
 
 
-class _NativeDeploymentExecutor:
+class _NativeModelExecutor:
     def reward_kwargs(self):
         return {"reward_model": self}
 
@@ -322,18 +322,18 @@ class TestMultiVisualRewardManagerRunSingle:
 
         assert result["reward_score"] == pytest.approx(0.8)
 
-    def test_mixes_rule_engine_and_native_deployments(self):
+    def test_mixes_rule_engine_and_native_models(self):
         manager = _build_manager(
             {
                 "rule": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0},
                 "engine": {
-                    "deployment": "ocr_engine",
+                    "model": "ocr_engine",
                     "path": DUMMY_REWARDS_PATH,
                     "name": "reward_uses_named_engine_router",
                     "weight": 2.0,
                 },
                 "native": {
-                    "deployment": "native_pickscore",
+                    "model": "native_pickscore",
                     "path": DUMMY_REWARDS_PATH,
                     "name": "reward_uses_native_model",
                     "weight": 1.0,
@@ -341,7 +341,7 @@ class TestMultiVisualRewardManagerRunSingle:
             }
         )
         manager.set_reward_executors(
-            {"ocr_engine": _EngineRouterClient()}, {"native_pickscore": _NativeDeploymentExecutor()}
+            {"ocr_engine": _EngineRouterClient()}, {"native_pickscore": _NativeModelExecutor()}
         )
 
         result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
@@ -357,13 +357,13 @@ class TestMultiVisualRewardManagerRunSingle:
         manager = _build_manager(
             {
                 "native": {
-                    "deployment": "native_model",
+                    "model": "native_model",
                     "path": DUMMY_REWARDS_PATH,
                     "name": "reward_uses_native_model",
                 }
             }
         )
-        manager.set_reward_executors(None, {"native_model": _NativeDeploymentExecutor()})
+        manager.set_reward_executors(None, {"native_model": _NativeModelExecutor()})
 
         result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
 
@@ -374,7 +374,7 @@ class TestMultiVisualRewardManagerRunSingle:
         manager = _build_manager(
             {
                 "ocr": {
-                    "deployment": "ocr_engine",
+                    "model": "ocr_engine",
                     "path": DUMMY_REWARDS_PATH,
                     "name": "reward_uses_named_engine_router",
                     "weight": 1.0,

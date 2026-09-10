@@ -116,21 +116,16 @@ class _PickScoreInferencer:
         }
 
     def score(self, prompts: list[str], images: list[Image.Image]) -> torch.Tensor:
-        """Legacy local PickScore path retained for non-deployment callers."""
+        """Score prompts and images for existing local callers."""
         output = self.infer(prompts, images)
         return _pairwise_pickscore(**output)
 
 
 class PickScoreNativeModel:
-    """Lifecycle-friendly PickScore inference model for native deployments.
+    """PickScore inference model for native named reward models.
 
-    ``RewardLoopWorker.compute_score_batch`` fans a batch out into concurrent
-    single-item calls. This model preserves the old PickScore batching
-    behavior by collecting those calls locally and running one CLIP forward for
-    up to ``_MAX_BATCH_SIZE`` items. The queue belongs to this model instance
-    (rather than module globals), so ``NativeRewardExecutor.sleep`` can stop it
-    before actor update. It returns embeddings; the configured reward function
-    remains responsible for computing PickScore.
+    Concurrent single-item requests are collected into local CLIP batches. The
+    model returns embeddings; the configured reward function computes the score.
     """
 
     def __init__(self, model_path: str = _MODEL_PATH, device=None, dtype=torch.float32):
@@ -178,8 +173,6 @@ class PickScoreNativeModel:
 
             requests = [request]
             should_stop = False
-            # Let all compute_score() tasks created by compute_score_batch reach
-            # the queue before taking the rest of this micro-batch.
             await asyncio.sleep(0)
             while len(requests) < _MAX_BATCH_SIZE:
                 try:
@@ -224,8 +217,6 @@ class PickScoreNativeModel:
             await self._score_queue.put((None, None, None))
             await self._consumer_task
         self._consumer_task = None
-        # Drop the whole inferencer before clearing the allocator: retaining a
-        # local ``model`` variable here would keep its accelerator storage live.
         if hasattr(self, "_inferencer"):
             del self._inferencer
         gc.collect()
@@ -347,7 +338,7 @@ async def compute_score_pickscore_native(
     reward_model,
     score_divisor: float = 26.0,
 ) -> dict:
-    """Compute PickScore from outputs produced by a native deployment."""
+    """Compute PickScore from outputs produced by a native named reward model."""
     del data_source, extra_info
     prompt = ground_truth or ""
     image = _to_pil_hwc(solution_image)
@@ -372,9 +363,9 @@ async def compute_score_pickscore_engine(
     logit_scale: float,
     score_divisor: float = 26.0,
 ) -> dict:
-    """Score an image through an engine-backed CLIP embedding deployment.
+    """Score an image through an engine-backed CLIP embedding model.
 
-    The deployment provides only the managed router and model name. This
+    The named model provides only the managed router and model name. This
     reward function owns the PickScore embedding request format and formula.
     ``logit_scale`` is explicit because vLLM CLIP pooling does not restore the
     PickScore checkpoint's parameter.

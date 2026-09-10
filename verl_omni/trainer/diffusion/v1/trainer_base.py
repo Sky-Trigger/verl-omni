@@ -58,7 +58,7 @@ from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
-from verl_omni.reward_loop.deployment import (
+from verl_omni.reward_loop.reward_model_config import (
     reward_is_enabled,
     reward_pool_is_separate,
     reward_role_required,

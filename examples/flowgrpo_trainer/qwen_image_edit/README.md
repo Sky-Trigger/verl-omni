@@ -99,7 +99,7 @@ bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh \
 ### Ascend NPU
 
 The NPU recipe uses the synchronous V1 diffusion trainer and a named native
-PickScore deployment. Its `placement.devices` list assigns one full PickScore
+PickScore model. Its `placement.devices` list assigns one full PickScore
 model worker to each native-pool bundle:
 
 ```bash
@@ -138,20 +138,20 @@ Set `TRAIN_FILES` and `VAL_FILES` to use different parquet files.
 | `REWARD_WORKERS` | `4` | Asynchronous reward worker count. |
 | `IMAGE_RESOLUTION` | `512` | Square target output resolution. |
 | `MAX_PROMPT_LENGTH` | `8192` | Token and prompt-embedding length limit. |
-| `PICKSCORE_MODEL_PATH` | `yuvalkirstain/PickScore_v1` | PickScore checkpoint for the native deployment. |
+| `PICKSCORE_MODEL_PATH` | `yuvalkirstain/PickScore_v1` | PickScore checkpoint for the native reward model. |
 | `NATIVE_REWARD_DEVICES` | `[0,1,2,3]` (CUDA) / `[0,...,15]` (NPU) | Native-subpool bundle indices; one full PickScore instance per entry. |
-| `REWARD_OFFLOAD` | `true` | `true` wakes/sleeps around scoring; `false` keeps the deployment resident. The meaning is identical for engine and native deployments. |
+| `REWARD_OFFLOAD` | `true` | `true` wakes/sleeps around scoring; `false` keeps the reward model resident. The meaning is identical for engine and native models. |
 
-The launcher configures `reward.deployments.pickscore.backend=native` and
-binds `reward.reward_functions.pickscore` to that deployment. Native workers
+The launcher configures `reward.models.pickscore.backend=native`; the same-name
+`reward.reward_functions.pickscore` entry binds automatically. Native workers
 preserve the PickScore model's local inference queue; they are not TP shards.
 The PickScore-specific processor is selected inside
-`verl_omni.utils.reward_score.pickscore_reward`, so deployments only provide
+`verl_omni.utils.reward_score.pickscore_reward`, so named models only provide
 the reward model path.
 
-See [Managed Multi-Reward Deployments](../../../docs/algo/managed_reward_deployments.md)
-for complete native-only and engine-only configurations, mixed deployment
-resource placement, lifecycle settings, and a legacy-engine migration example.
+See [Named Reward Models](../../../docs/algo/named_reward_models.md)
+for native-only and engine-only configurations, mixed-model resource placement,
+lifecycle settings, and the custom-model extension contract.
 
 Additional Hydra overrides can be appended to the command:
 

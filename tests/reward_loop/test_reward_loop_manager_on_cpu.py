@@ -57,7 +57,7 @@ def _build_workers(num_workers, resource_pool):
         reward_loop_workers_class=_FakeActorClass(),
         accelerator_resource_pool=resource_pool,
         reward_router_address="router",
-        reward_executor_specs={"native": "spec"},
+        reward_model_specs={"native": "spec"},
     )
 
 
@@ -67,7 +67,7 @@ def _build_selected_workers(bundle_indices, resource_pool, prefix="native_reward
         reward_loop_workers_class=_FakeActorClass(),
         accelerator_resource_pool=resource_pool,
         reward_router_address="router",
-        reward_executor_specs={"pickscore": "spec"},
+        reward_model_specs={"pickscore": "spec"},
         bundle_indices=bundle_indices,
         worker_name_prefix=prefix,
     )

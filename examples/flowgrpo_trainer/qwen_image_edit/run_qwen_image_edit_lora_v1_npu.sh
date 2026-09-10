@@ -86,12 +86,11 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     reward.reward_model.enable=False \
-    +reward.deployments.pickscore.backend=native \
-    +reward.deployments.pickscore.offload=$REWARD_OFFLOAD \
-    +reward.deployments.pickscore.adapter=pickscore \
-    +reward.deployments.pickscore.model_path=$pickscore_model_path \
-    +reward.deployments.pickscore.placement.devices="$NATIVE_REWARD_DEVICES" \
-    +reward.reward_functions.pickscore.deployment=pickscore \
+    +reward.models.pickscore.backend=native \
+    +reward.models.pickscore.offload=$REWARD_OFFLOAD \
+    +reward.models.pickscore.reward_name=pickscore \
+    +reward.models.pickscore.model_path=$pickscore_model_path \
+    +reward.models.pickscore.placement.devices="$NATIVE_REWARD_DEVICES" \
     +reward.reward_functions.pickscore.path=pkg://verl_omni.utils.reward_score.pickscore_reward \
     +reward.reward_functions.pickscore.name=compute_score_pickscore_native \
     trainer.logger='["console", "tensorboard"]' \
