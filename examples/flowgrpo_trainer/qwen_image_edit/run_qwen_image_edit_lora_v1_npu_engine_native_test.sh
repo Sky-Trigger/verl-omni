@@ -6,7 +6,8 @@ set -x
 export VLLM_ASCEND_ENABLE_NZ=0
 export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 model_name=${MODEL_PATH:-Qwen/Qwen-Image-Edit-2511}
-pickscore_model_path=${PICKSCORE_MODEL_PATH:-yuvalkirstain/PickScore_v1}
+reward_model_path=${REWARD_MODEL_PATH:-yuvalkirstain/PickScore_v1}
+reward_function_path=${REWARD_FUNCTION_PATH:-pkg://verl_omni.utils.reward_score.pickscore_reward}
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
@@ -91,11 +92,12 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     reward.reward_model.enable_resource_pool=False \
     +reward.models.engine_model.backend=engine \
     +reward.models.engine_model.offload=$REWARD_OFFLOAD \
-    +reward.models.engine_model.model_path=$pickscore_model_path \
+    +reward.models.engine_model.model_path=$reward_model_path \
     +reward.models.engine_model.n_gpus_per_node=$ENGINE_REWARD_NPUS \
     +reward.models.engine_model.nnodes=1 \
     +reward.models.engine_model.rollout.name=vllm \
     +reward.models.engine_model.rollout.dtype=bfloat16 \
+    +reward.models.engine_model.rollout.gpu_memory_utilization=0.1 \
     +reward.models.engine_model.rollout.tensor_model_parallel_size=1 \
     +reward.models.engine_model.rollout.data_parallel_size=1 \
     +reward.models.engine_model.rollout.pipeline_model_parallel_size=1 \
@@ -106,14 +108,14 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     +reward.models.engine_model.rollout.engine_kwargs.vllm.runner=pooling \
     +reward.models.native_model.backend=native \
     +reward.models.native_model.offload=$REWARD_OFFLOAD \
-    +reward.models.native_model.model_path=$pickscore_model_path \
+    +reward.models.native_model.model_path=$reward_model_path \
     +reward.models.native_model.placement.devices="$NATIVE_REWARD_DEVICES" \
     +reward.models.native_model.executor.model=verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel \
-    +reward.reward_functions.engine_model.path=pkg://verl_omni.utils.reward_score.pickscore_reward \
+    +reward.reward_functions.engine_model.path=$reward_function_path \
     +reward.reward_functions.engine_model.name=compute_score_pickscore_engine \
     +reward.reward_functions.engine_model.logit_scale=$PICKSCORE_LOGIT_SCALE \
     +reward.reward_functions.engine_model.weight=0.5 \
-    +reward.reward_functions.native_model.path=pkg://verl_omni.utils.reward_score.pickscore_reward \
+    +reward.reward_functions.native_model.path=$reward_function_path \
     +reward.reward_functions.native_model.name=compute_score_pickscore_native \
     +reward.reward_functions.native_model.weight=0.5 \
     trainer.logger='["console", "tensorboard"]' \

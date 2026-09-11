@@ -128,12 +128,18 @@ class PickScoreNativeModel:
     model returns embeddings; the configured reward function computes the score.
     """
 
-    def __init__(self, model_path: str = _MODEL_PATH, device=None, dtype=torch.float32):
+    def __init__(
+        self,
+        model_path: str = _MODEL_PATH,
+        processor_path: str | None = None,
+        device=None,
+        dtype=torch.float32,
+    ):
         self._inferencer = _PickScoreInferencer(
             device=device,
             dtype=dtype,
             model_path=model_path,
-            processor_path=_PROCESSOR_PATH,
+            processor_path=processor_path or model_path,
         )
         self._score_queue = asyncio.Queue()
         self._consumer_task = None
