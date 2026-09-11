@@ -97,6 +97,7 @@ _LATENTS_STD = [
     1.916,
 ]
 
+
 def _mrope_section(head_dim: int) -> list[int]:
     """Split ``head_dim // 2`` into a 3-way (temporal, height, width) M-RoPE section.
 
@@ -171,9 +172,7 @@ def _build_tiny_processor(tokenizer: Qwen2TokenizerFast) -> Qwen2VLProcessor:
     )
 
 
-def get_dummy_components(
-    *, tokenizer: Qwen2TokenizerFast, hidden_size: int = 16, seed: int = 42
-) -> dict[str, Any]:
+def get_dummy_components(*, tokenizer: Qwen2TokenizerFast, hidden_size: int = 16, seed: int = 42) -> dict[str, Any]:
     """Instantiate tiny Qwen-Image-Edit diffusion components (random weights)."""
     torch.manual_seed(seed)
     transformer = QwenImageTransformer2DModel(
