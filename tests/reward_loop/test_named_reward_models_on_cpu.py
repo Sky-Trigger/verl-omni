@@ -80,7 +80,7 @@ def test_mixed_engine_and_native_models_share_one_parent_pool(monkeypatch):
             "ocr": {"backend": "engine", "model_path": "/models/ocr"},
             "pickscore": {
                 "backend": "native",
-                "reward_name": "pickscore",
+                "executor": {"model": "tests.fake:Model"},
                 "placement": {"devices": [0, 1, 2, 3]},
             },
         }
@@ -214,7 +214,15 @@ def test_engine_model_requires_trainer_parent_pool():
 
 
 def test_native_only_model_uses_parent_pool_and_batch_scoring():
-    config = _config({"pickscore": {"backend": "native", "reward_name": "pickscore", "placement": {"devices": [0]}}})
+    config = _config(
+        {
+            "quality": {
+                "backend": "native",
+                "executor": {"model": "tests.fake:Model"},
+                "placement": {"devices": [0]},
+            }
+        }
+    )
 
     assert reward_is_enabled(config)
     assert reward_role_required(config)
@@ -241,16 +249,25 @@ def test_engine_model_rejects_per_model_pool_switch():
         MultiRewardModelManager(config, resource_pool=SimpleNamespace(world_size=1))
 
 
-def test_native_pickscore_reward_name_selects_builtin_model():
+def test_native_model_uses_configured_executor_class():
     model = NativeManagedRewardModel(
-        "pickscore",
-        OmegaConf.create({"backend": "native", "reward_name": "pickscore", "model_path": "/models/pickscore"}),
+        "quality",
+        OmegaConf.create(
+            {
+                "backend": "native",
+                "executor": {"model": "my_package.reward:QualityModel"},
+                "model_path": "/models/quality",
+            }
+        ),
     )
 
-    assert model.executor_spec.executor_config["model"] == (
-        "verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel"
-    )
-    assert model.executor_spec.model_path == "/models/pickscore"
+    assert model.executor_spec.executor_config["model"] == "my_package.reward:QualityModel"
+    assert model.executor_spec.model_path == "/models/quality"
+
+
+def test_native_model_requires_configured_executor_class():
+    with pytest.raises(ValueError, match="requires executor.model"):
+        NativeManagedRewardModel("quality", OmegaConf.create({"backend": "native"}))
 
 
 @pytest.mark.asyncio
@@ -278,7 +295,13 @@ async def test_native_model_delegates_lifecycle_to_bound_workers():
     ]
     model = NativeManagedRewardModel(
         "pickscore",
-        OmegaConf.create({"backend": "native", "reward_name": "pickscore", "model_path": "/models/pickscore"}),
+        OmegaConf.create(
+            {
+                "backend": "native",
+                "executor": {"model": "tests.fake:Model"},
+                "model_path": "/models/pickscore",
+            }
+        ),
     )
     model.bind_workers(workers)
 
@@ -319,7 +342,7 @@ async def test_native_model_can_stay_resident():
             {
                 "backend": "native",
                 "offload": False,
-                "reward_name": "pickscore",
+                "executor": {"model": "tests.fake:Model"},
                 "model_path": "/models/pickscore",
             }
         ),
@@ -340,7 +363,7 @@ async def test_native_model_can_stay_resident():
             {
                 "pickscore": {
                     "backend": "native",
-                    "reward_name": "pickscore",
+                    "executor": {"model": "tests.fake:Model"},
                     "placement": {"devices": []},
                 }
             },
@@ -350,7 +373,7 @@ async def test_native_model_can_stay_resident():
             {
                 "pickscore": {
                     "backend": "native",
-                    "reward_name": "pickscore",
+                    "executor": {"model": "tests.fake:Model"},
                     "placement": {"devices": [0, 0]},
                 }
             },
@@ -360,7 +383,7 @@ async def test_native_model_can_stay_resident():
             {
                 "pickscore": {
                     "backend": "native",
-                    "reward_name": "pickscore",
+                    "executor": {"model": "tests.fake:Model"},
                     "placement": {"devices": [-1]},
                 }
             },
@@ -370,7 +393,7 @@ async def test_native_model_can_stay_resident():
             {
                 "pickscore": {
                     "backend": "native",
-                    "reward_name": "pickscore",
+                    "executor": {"model": "tests.fake:Model"},
                     "placement": {"devices": [0]},
                     "rollout": {"tensor_model_parallel_size": 2},
                 }
@@ -387,7 +410,11 @@ def test_native_model_rejects_invalid_placement(models, message):
 def test_native_model_rejects_overlapping_device_assignments():
     config = _config(
         {
-            "pickscore": {"backend": "native", "reward_name": "pickscore", "placement": {"devices": [0, 1]}},
+            "pickscore": {
+                "backend": "native",
+                "executor": {"model": "tests.fake:Model"},
+                "placement": {"devices": [0, 1]},
+            },
             "hpsv3": {
                 "backend": "native",
                 "executor": {"model": "tests.fake:HpsModel"},
@@ -403,7 +430,11 @@ def test_native_model_rejects_overlapping_device_assignments():
 def test_native_device_assignments_size_the_native_subpool(monkeypatch):
     config = _config(
         {
-            "pickscore": {"backend": "native", "reward_name": "pickscore", "placement": {"devices": [0, 1]}},
+            "pickscore": {
+                "backend": "native",
+                "executor": {"model": "tests.fake:Model"},
+                "placement": {"devices": [0, 1]},
+            },
             "hpsv3": {
                 "backend": "native",
                 "executor": {"model": "tests.fake:HpsModel"},
@@ -436,7 +467,11 @@ def test_native_device_assignments_size_the_native_subpool(monkeypatch):
 def test_native_models_create_isolated_worker_groups(monkeypatch):
     config = _config(
         {
-            "pickscore": {"backend": "native", "reward_name": "pickscore", "placement": {"devices": [0, 1]}},
+            "pickscore": {
+                "backend": "native",
+                "executor": {"model": "tests.fake:Model"},
+                "placement": {"devices": [0, 1]},
+            },
             "hpsv3": {
                 "backend": "native",
                 "executor": {"model": "tests.fake:HpsModel"},
@@ -865,7 +900,7 @@ async def test_worker_exposes_native_model_lifecycle():
 
 
 def test_model_manager_rejects_existing_and_named_models():
-    config = _config({"pickscore": {"backend": "native", "reward_name": "pickscore"}})
+    config = _config({"quality": {"backend": "native", "executor": {"model": "tests.fake:Model"}}})
     config.reward.reward_model.enable = True
 
     with pytest.raises(ValueError, match="cannot be combined"):

@@ -67,8 +67,6 @@ class MultiRewardModelManager:
                     f"Engine reward model {name!r} must not set enable_resource_pool; "
                     "select the parent pool with reward.reward_model.enable_resource_pool instead"
                 )
-            if model.get("reward_name") is not None:
-                raise ValueError(f"Engine reward model {name!r} does not use reward_name")
 
         self.native_device_assignments = self._validate_native_device_assignments(native_entries)
         engine_pools, self.native_resource_pool = self._split_model_resource_pools(
@@ -288,14 +286,8 @@ class NativeManagedRewardModel(ManagedRewardModel):
         offload = _resolve_model_offload(model)
         executor_config = to_mapping(model.get("executor"))
         model_class = executor_config.get("model")
-        reward_name = model.get("reward_name")
-        if model_class is None and reward_name == "pickscore":
-            model_class = "verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel"
-            executor_config["model"] = model_class
-        elif model_class is None and reward_name is not None:
-            raise ValueError(f"Native reward model {name!r} has unsupported reward_name {reward_name!r}")
         if not model_class:
-            raise ValueError(f"Native reward model {name!r} requires reward_name or executor.model")
+            raise ValueError(f"Native reward model {name!r} requires executor.model")
 
         super().__init__(
             RewardModelSpec(
@@ -350,7 +342,7 @@ def _prepare_engine_config(model, base_config, fallback_model=None):
         OmegaConf.create(to_mapping(base_config)),
         OmegaConf.create(to_mapping(model)),
     )
-    for key in ("backend", "executor", "name", "enable_resource_pool", "reward_name", "offload", "placement"):
+    for key in ("backend", "executor", "name", "enable_resource_pool", "offload", "placement"):
         if key in config:
             del config[key]
     config.enable = True

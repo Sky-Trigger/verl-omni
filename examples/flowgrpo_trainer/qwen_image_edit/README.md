@@ -145,9 +145,9 @@ Set `TRAIN_FILES` and `VAL_FILES` to use different parquet files.
 The launcher configures `reward.models.pickscore.backend=native`; the same-name
 `reward.reward_functions.pickscore` entry binds automatically. Native workers
 preserve the PickScore model's local inference queue; they are not TP shards.
-The PickScore-specific processor is selected inside
-`verl_omni.utils.reward_score.pickscore_reward`, so named models only provide
-the reward model path.
+The launcher explicitly configures the PickScore model class through
+`executor.model`; the generic native backend does not select model-specific
+behavior.
 
 See [Named Reward Models](../../../docs/algo/named_reward_models.md)
 for native-only and engine-only configurations, mixed-model resource placement,

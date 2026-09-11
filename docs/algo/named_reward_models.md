@@ -8,8 +8,8 @@ calculation:
 - a reward function consumes model output and computes the score;
 - `MultiVisualRewardManager` combines the configured scores by weighted sum.
 
-PickScore is the built-in native example, not the only model supported by the
-framework.
+PickScore is one example implemented through the same generic native-model
+extension contract as third-party reward models.
 
 ## Current scope
 
@@ -40,18 +40,19 @@ reward:
     enable_resource_pool: false
 
   models:
-    pickscore:
+    quality:
       backend: native
-      reward_name: pickscore
       offload: true
-      model_path: /models/PickScore_v1
+      model_path: /models/quality
       placement:
         devices: [0, 1, 2, 3]
+      executor:
+        model: my_package.reward_model:QualityModel
 
   reward_functions:
-    pickscore:
-      path: pkg://verl_omni.utils.reward_score.pickscore_reward
-      name: compute_score_pickscore_native
+    quality:
+      path: pkg://my_package.reward_score
+      name: compute_quality_score
       weight: 1.0
       required: true
 ```
@@ -62,13 +63,13 @@ multiple terms share one model:
 ```yaml
 reward_functions:
   semantic_quality:
-    model: pickscore
+    model: quality
     path: pkg://my_package.rewards
     name: compute_semantic_quality
 ```
 
-`reward_name` selects a built-in native implementation. A custom native model
-uses `executor.model` instead.
+Every native model declares its implementation through `executor.model`; the
+generic framework does not select behavior from a model-specific name.
 
 Every term retains the existing aggregation contract:
 

@@ -88,9 +88,9 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     reward.reward_model.enable=False \
     +reward.models.pickscore.backend=native \
     +reward.models.pickscore.offload=$REWARD_OFFLOAD \
-    +reward.models.pickscore.reward_name=pickscore \
     +reward.models.pickscore.model_path=$pickscore_model_path \
     +reward.models.pickscore.placement.devices="$NATIVE_REWARD_DEVICES" \
+    +reward.models.pickscore.executor.model=verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel \
     +reward.reward_functions.pickscore.path=pkg://verl_omni.utils.reward_score.pickscore_reward \
     +reward.reward_functions.pickscore.name=compute_score_pickscore_native \
     trainer.logger='["console", "tensorboard"]' \
