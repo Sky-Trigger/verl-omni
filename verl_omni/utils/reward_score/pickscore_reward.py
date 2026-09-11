@@ -131,7 +131,7 @@ class PickScoreNativeModel:
     def __init__(
         self,
         model_path: str = _MODEL_PATH,
-        processor_path: str | None = None,
+        processor_path: str = _PROCESSOR_PATH,
         device=None,
         dtype=torch.float32,
     ):
@@ -139,7 +139,7 @@ class PickScoreNativeModel:
             device=device,
             dtype=dtype,
             model_path=model_path,
-            processor_path=processor_path or model_path,
+            processor_path=processor_path,
         )
         self._score_queue = asyncio.Queue()
         self._consumer_task = None

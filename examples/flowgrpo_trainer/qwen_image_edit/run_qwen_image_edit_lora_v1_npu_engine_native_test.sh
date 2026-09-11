@@ -8,6 +8,7 @@ export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 model_name=${MODEL_PATH:-Qwen/Qwen-Image-Edit-2511}
 reward_model_path=${REWARD_MODEL_PATH:-yuvalkirstain/PickScore_v1}
 reward_function_path=${REWARD_FUNCTION_PATH:-pkg://verl_omni.utils.reward_score.pickscore_reward}
+processor_path=${PROCESSOR_PATH:-$reward_model_path}
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
@@ -111,6 +112,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     +reward.models.native_model.model_path=$reward_model_path \
     +reward.models.native_model.placement.devices="$NATIVE_REWARD_DEVICES" \
     +reward.models.native_model.executor.model=verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel \
+    +reward.models.native_model.executor.kwargs.processor_path=$processor_path \
     +reward.reward_functions.engine_model.path=$reward_function_path \
     +reward.reward_functions.engine_model.name=compute_score_pickscore_engine \
     +reward.reward_functions.engine_model.logit_scale=$PICKSCORE_LOGIT_SCALE \
