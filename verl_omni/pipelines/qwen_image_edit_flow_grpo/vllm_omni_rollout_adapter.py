@@ -112,6 +112,17 @@ def _validate_condition_image_sizes(condition_images, vae_image_sizes, target_si
         )
 
 
+def _condition_images_for_prompt_encoding(custom_prompt: dict) -> list[Any]:
+    """Use the raw image that was used to build the pre-tokenized prompt."""
+    raw_payload = {
+        key: custom_prompt[key] for key in ("images", "image", "multi_modal_data", "extra_args") if key in custom_prompt
+    }
+    raw_images = condition_images_from_payload(raw_payload)
+    if raw_images:
+        return raw_images
+    return condition_images_from_payload(custom_prompt)
+
+
 @VllmOmniPipelineBase.register("QwenImageEditPlusPipeline", algorithm="flow_grpo")
 class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImageEditPlusPipeline):
     """Qwen-Image-Edit-Plus rollout pipeline for FlowGRPO."""
@@ -368,7 +379,9 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
 
         # Condition images are parsed from the rollout request payload; the prompt
         # itself is read from custom_prompt below.
-        condition_images = condition_images_from_payload(custom_prompt) if isinstance(custom_prompt, dict) else None
+        condition_images = (
+            _condition_images_for_prompt_encoding(custom_prompt) if isinstance(custom_prompt, dict) else None
+        )
         if not condition_images:
             raise ValueError("Qwen-Image-Edit requires at least one condition image")
 
