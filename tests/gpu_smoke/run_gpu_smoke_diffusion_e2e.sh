@@ -78,11 +78,15 @@ run_test 13 "MiniMax-H3 FlowGRPO T2VA trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ROLLOUT_TP=2 TOTAL_TRAINING_STEPS=1 \
     python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va
 
-python tests/special_e2e/build_qwen_image_edit_plus_tiny_random.py \
-    --output-dir ~/models/tiny-random/qwen-image-edit-plus
+run_qwen_image_edit_flowgrpo_e2e() {
+    local model_path="${MODEL_PATH:-${HOME}/models/tiny-random/qwen-image-edit-plus}"
+    python tests/special_e2e/build_qwen_image_edit_plus_tiny_random.py \
+        --output-dir "${model_path}"
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" MODEL_PATH="${model_path}" \
+        bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}"
+}
 
 run_test 14 "Qwen-Image-Edit FlowGRPO trainer e2e" \
-    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
-    bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}"
+    run_qwen_image_edit_flowgrpo_e2e
 
 gpu_smoke_summary
