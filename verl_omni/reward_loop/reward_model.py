@@ -25,11 +25,12 @@ from verl.experimental.reward_loop.reward_model import RewardModelManager
 from verl.single_controller.ray.base import split_resource_pool
 
 from .reward_model_config import (
+    EngineRewardModelConfig,
+    NativeRewardModelConfig,
     RewardModelSpec,
     get_reward_model_entries,
     has_reward_models,
-    is_engine_backend,
-    parse_reward_model_placement,
+    parse_reward_model_config,
     to_mapping,
 )
 
@@ -55,18 +56,13 @@ class MultiRewardModelManager:
         self.engine_resource_pools: dict[str, Any] = {}
         self.native_resource_pool = None
 
-        entries = get_reward_model_entries(config)
+        entries = [
+            (name, parse_reward_model_config(name, model)) for name, model in get_reward_model_entries(config).items()
+        ]
         base_config = config.reward.reward_model
         fallback_model = base_config.get("model_path")
-        engine_entries = [(name, model) for name, model in entries.items() if is_engine_backend(model.get("backend"))]
-        native_entries = [(name, model) for name, model in entries.items() if model.get("backend") == "native"]
-
-        for name, model in engine_entries:
-            if "enable_resource_pool" in model:
-                raise ValueError(
-                    f"Engine reward model {name!r} must not set enable_resource_pool; "
-                    "select the parent pool with reward.reward_model.enable_resource_pool instead"
-                )
+        engine_entries = [(name, model) for name, model in entries if isinstance(model, EngineRewardModelConfig)]
+        native_entries = [(name, model) for name, model in entries if isinstance(model, NativeRewardModelConfig)]
 
         self.native_device_assignments = self._validate_native_device_assignments(native_entries)
         engine_pools, self.native_resource_pool = self._split_model_resource_pools(
@@ -74,18 +70,13 @@ class MultiRewardModelManager:
         )
         self.engine_resource_pools = engine_pools
 
-        for name, model in entries.items():
-            backend = model.get("backend")
-            if is_engine_backend(backend):
+        for name, model in entries:
+            if isinstance(model, EngineRewardModelConfig):
                 self.models[name] = EngineManagedRewardModel(
                     name, model, base_config, engine_pools.get(name), fallback_model
                 )
-            elif backend == "native":
-                self.models[name] = NativeManagedRewardModel(name, model)
             else:
-                raise ValueError(
-                    f"Reward model {name!r} has unsupported backend {backend!r}; expected one of engine, native"
-                )
+                self.models[name] = NativeManagedRewardModel(name, model)
 
     @property
     def reward_model_specs(self) -> dict[str, RewardModelSpec]:
@@ -124,52 +115,21 @@ class MultiRewardModelManager:
             raise errors[0]
 
     @staticmethod
-    def _rollout_world_size(model, base_config) -> int:
-        rollout = to_mapping(model.get("rollout"))
-        base_rollout = to_mapping(base_config.get("rollout"))
-        merged = {**base_rollout, **rollout}
-        parallel_sizes = [
-            int(merged.get("tensor_model_parallel_size", 1)),
-            int(merged.get("data_parallel_size", 1)),
-            int(merged.get("pipeline_model_parallel_size", 1)),
-        ]
-        if any(size <= 0 for size in parallel_sizes):
-            raise ValueError("Engine reward rollout parallel sizes must be positive")
-        replicas = int(model.get("replicas", 1))
-        if replicas <= 0:
-            raise ValueError("Engine reward model replicas must be positive")
-        return replicas * parallel_sizes[0] * parallel_sizes[1] * parallel_sizes[2]
-
-    @staticmethod
-    def _validate_native_device_assignments(native_entries) -> dict[str, tuple[int, ...]]:
+    def _validate_native_device_assignments(
+        native_entries: list[tuple[str, NativeRewardModelConfig]],
+    ) -> dict[str, tuple[int, ...]]:
+        """Validate only cross-model placement overlap."""
         assignments: dict[str, tuple[int, ...]] = {}
         claimed_devices: dict[int, str] = {}
-        engine_fields = {
-            "replicas",
-            "rollout",
-            "n_gpus_per_node",
-            "nnodes",
-            "tensor_model_parallel_size",
-            "data_parallel_size",
-            "pipeline_model_parallel_size",
-            "expert_parallel_size",
-            "enable_resource_pool",
-        }
         for name, model in native_entries:
-            unsupported = sorted(field for field in engine_fields if model.get(field) is not None)
-            if unsupported:
-                fields = ", ".join(unsupported)
-                raise ValueError(f"Native reward model {name!r} does not support engine resource fields: {fields}")
-
-            placement = parse_reward_model_placement(name, model.get("placement"))
-            for device in placement.devices:
+            for device in model.placement.devices:
                 if device in claimed_devices:
                     raise ValueError(
                         f"Native reward model {name!r} placement.devices overlaps index {device} "
                         f"already assigned to {claimed_devices[device]!r}"
                     )
                 claimed_devices[device] = name
-            assignments[name] = tuple(placement.devices)
+            assignments[name] = tuple(model.placement.devices)
         return assignments
 
     def _split_engine_resource_pool(self, engine_entries, base_config) -> dict[str, Any]:
@@ -184,25 +144,8 @@ class MultiRewardModelManager:
             raise ValueError("Named reward models require a parent resource pool selected by the trainer")
 
         engine_requested_sizes = []
-        for name, model in engine_entries:
-            explicit_gpus = model.get("n_gpus_per_node")
-            explicit_nodes = model.get("nnodes")
-            if (explicit_gpus is None) != (explicit_nodes is None):
-                raise ValueError(f"Engine reward model {name!r} must set both n_gpus_per_node and nnodes")
-            requested = (
-                int(explicit_gpus) * int(explicit_nodes)
-                if explicit_gpus is not None
-                else self._rollout_world_size(model, base_config)
-            )
-            if requested <= 0:
-                raise ValueError(f"Engine reward model {name!r} resource allocation must be positive")
-            rollout_world_size = self._rollout_world_size(model, base_config)
-            if requested < rollout_world_size or requested % rollout_world_size:
-                raise ValueError(
-                    f"Engine reward model {name!r} allocation ({requested}) must be a multiple of "
-                    f"rollout world size ({rollout_world_size})"
-                )
-            engine_requested_sizes.append(requested)
+        for _, model in engine_entries:
+            engine_requested_sizes.append(model.requested_resource_size(base_config))
 
         native_requested = 0
         if native_entries:
@@ -257,7 +200,9 @@ class EngineManagedRewardModel(ManagedRewardModel):
     """Engine-backed model owned by the upstream ``RewardModelManager``."""
 
     def __init__(self, name: str, model, base_config, resource_pool, fallback_model=None):
-        offload = _resolve_model_offload(model)
+        if not isinstance(model, EngineRewardModelConfig):
+            model = parse_reward_model_config(name, model)
+        offload = model.resolved_offload
         config = _prepare_engine_config(model, base_config, fallback_model)
         self.reward_model_manager = RewardModelManager(config, resource_pool)
         super().__init__(
@@ -283,17 +228,16 @@ class NativeManagedRewardModel(ManagedRewardModel):
     """Native model state owned by explicitly placed reward workers."""
 
     def __init__(self, name: str, model):
-        offload = _resolve_model_offload(model)
-        executor_config = to_mapping(model.get("executor"))
-        model_class = executor_config.get("model")
-        if not model_class:
-            raise ValueError(f"Native reward model {name!r} requires executor.model")
+        if not isinstance(model, NativeRewardModelConfig):
+            model = parse_reward_model_config(name, model)
+        offload = model.resolved_offload
+        executor_config = {"model": model.executor.model, "kwargs": model.executor.kwargs}
 
         super().__init__(
             RewardModelSpec(
                 name=name,
                 backend="native",
-                model_path=model.get("model_path"),
+                model_path=model.model_path,
                 executor_config=executor_config,
             ),
             offload=offload,
@@ -323,28 +267,14 @@ class NativeManagedRewardModel(ManagedRewardModel):
         self._resident = False
 
 
-def _resolve_model_offload(model) -> bool:
-    """Resolve the shared lifecycle policy and existing engine aliases."""
-    explicit = model.get("offload")
-    rollout = to_mapping(model.get("rollout"))
-    alias_values = [rollout[key] for key in ("free_cache_engine", "enable_sleep_mode") if key in rollout]
-    values = ([explicit] if explicit is not None else []) + alias_values
-    if any(not isinstance(value, bool) for value in values):
-        raise ValueError("Reward model offload must be a boolean")
-    if len(set(values)) > 1:
-        raise ValueError("Reward model offload conflicts with rollout sleep settings")
-    return values[0] if values else True
-
-
 def _prepare_engine_config(model, base_config, fallback_model=None):
-    offload = _resolve_model_offload(model)
+    if not isinstance(model, EngineRewardModelConfig):
+        model = parse_reward_model_config("engine", model)
+    offload = model.resolved_offload
     config = OmegaConf.merge(
         OmegaConf.create(to_mapping(base_config)),
-        OmegaConf.create(to_mapping(model)),
+        OmegaConf.create(model.to_engine_overrides()),
     )
-    for key in ("backend", "executor", "name", "enable_resource_pool", "offload", "placement"):
-        if key in config:
-            del config[key]
     config.enable = True
     if config.get("model_path") is None:
         config.model_path = fallback_model

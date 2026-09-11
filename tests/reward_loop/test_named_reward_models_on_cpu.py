@@ -39,8 +39,11 @@ from verl_omni.reward_loop.reward_model import (
     _prepare_engine_config,
 )
 from verl_omni.reward_loop.reward_model_config import (
+    EngineRewardModelConfig,
+    NativeRewardModelConfig,
     RewardModelSpec,
     accelerator_workers_enabled,
+    parse_reward_model_config,
     resolve_reward_model_name,
     reward_is_enabled,
     reward_pool_is_separate,
@@ -60,6 +63,10 @@ def _config(models=None):
     config.reward.reward_model.enable = False
     config.reward.models = OmegaConf.create(models or {})
     return config
+
+
+def _parsed_models(config):
+    return [(name, parse_reward_model_config(name, model)) for name, model in config.reward.models.items()]
 
 
 def test_engine_models_require_parent_pool():
@@ -88,8 +95,9 @@ def test_mixed_engine_and_native_models_share_one_parent_pool(monkeypatch):
     manager = object.__new__(MultiRewardModelManager)
     manager.config = config
     manager.resource_pool = SimpleNamespace(world_size=10)
+    parsed = dict(_parsed_models(config))
     manager.native_device_assignments = manager._validate_native_device_assignments(
-        [("pickscore", config.reward.models.pickscore)]
+        [("pickscore", parsed["pickscore"])]
     )
     observed = {}
 
@@ -100,8 +108,8 @@ def test_mixed_engine_and_native_models_share_one_parent_pool(monkeypatch):
 
     monkeypatch.setattr(reward_model_module, "split_resource_pool", fake_split)
     engine_pools, native_pool = manager._split_model_resource_pools(
-        [("ocr", config.reward.models.ocr)],
-        [("pickscore", config.reward.models.pickscore)],
+        [("ocr", parsed["ocr"])],
+        [("pickscore", parsed["pickscore"])],
         config.reward.reward_model,
     )
 
@@ -122,16 +130,13 @@ def test_multi_reward_model_manager_splits_parent_pool(monkeypatch):
         return [f"sub-{index}" for index in range(len(sizes))]
 
     monkeypatch.setattr(reward_model_module, "split_resource_pool", fake_split)
-    entries = [
-        (
-            "pickscore",
-            {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2},
-        ),
-        (
-            "ocr",
-            {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2},
-        ),
-    ]
+    config = _config(
+        {
+            "pickscore": {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2},
+            "ocr": {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2},
+        }
+    )
+    entries = _parsed_models(config)
     base_config = {"rollout": {"tensor_model_parallel_size": 1}}
 
     result = manager._split_engine_resource_pool(entries, base_config)
@@ -143,10 +148,13 @@ def test_multi_reward_model_manager_splits_parent_pool(monkeypatch):
 def test_multi_reward_model_manager_rejects_parent_pool_overcommit():
     manager = object.__new__(MultiRewardModelManager)
     manager.resource_pool = SimpleNamespace(world_size=4)
-    entries = [
-        ("one", {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2}),
-        ("two", {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 1}),
-    ]
+    config = _config(
+        {
+            "one": {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 2},
+            "two": {"backend": "engine", "rollout": {"tensor_model_parallel_size": 2}, "replicas": 1},
+        }
+    )
+    entries = _parsed_models(config)
 
     with pytest.raises(ValueError, match="request 6 devices"):
         manager._split_engine_resource_pool(entries, {"rollout": {"tensor_model_parallel_size": 1}})
@@ -245,8 +253,51 @@ def test_accelerator_worker_setting_keeps_the_legacy_alias():
 def test_engine_model_rejects_per_model_pool_switch():
     config = _config({"ocr": {"backend": "engine", "enable_resource_pool": True}})
 
-    with pytest.raises(ValueError, match="must not set enable_resource_pool"):
+    with pytest.raises(ValueError, match="unsupported fields: enable_resource_pool"):
         MultiRewardModelManager(config, resource_pool=SimpleNamespace(world_size=1))
+
+
+def test_named_model_entries_parse_to_backend_specific_base_configs():
+    engine = parse_reward_model_config(
+        "ocr",
+        OmegaConf.create({"backend": "engine", "model_path": "/models/ocr"}),
+    )
+    native = parse_reward_model_config(
+        "quality",
+        OmegaConf.create(
+            {
+                "backend": "native",
+                "placement": {"devices": [0]},
+                "executor": {"model": "tests.fake:Model", "kwargs": {"threshold": 0.5}},
+            }
+        ),
+    )
+
+    assert isinstance(engine, EngineRewardModelConfig)
+    assert isinstance(native, NativeRewardModelConfig)
+    assert native.executor.kwargs == {"threshold": 0.5}
+
+
+@pytest.mark.parametrize(
+    ("model", "message"),
+    [
+        ({"backend": "engine", "replicas": 0}, "replicas must be a positive integer"),
+        ({"backend": "engine", "n_gpus_per_node": 1}, "must set both n_gpus_per_node and nnodes"),
+        ({"backend": "native", "placement": {"devices": [0]}}, "requires executor.model"),
+        (
+            {
+                "backend": "native",
+                "placement": {"devices": [0]},
+                "executor": {"model": "tests.fake:Model"},
+                "rollout": {},
+            },
+            "unsupported fields: rollout",
+        ),
+    ],
+)
+def test_backend_schema_rejects_invalid_single_model_fields(model, message):
+    with pytest.raises(ValueError, match=message):
+        parse_reward_model_config("model", OmegaConf.create(model))
 
 
 def test_native_model_uses_configured_executor_class():
@@ -257,6 +308,7 @@ def test_native_model_uses_configured_executor_class():
                 "backend": "native",
                 "executor": {"model": "my_package.reward:QualityModel"},
                 "model_path": "/models/quality",
+                "placement": {"devices": [0]},
             }
         ),
     )
@@ -267,7 +319,10 @@ def test_native_model_uses_configured_executor_class():
 
 def test_native_model_requires_configured_executor_class():
     with pytest.raises(ValueError, match="requires executor.model"):
-        NativeManagedRewardModel("quality", OmegaConf.create({"backend": "native"}))
+        NativeManagedRewardModel(
+            "quality",
+            OmegaConf.create({"backend": "native", "placement": {"devices": [0]}}),
+        )
 
 
 @pytest.mark.asyncio
@@ -300,6 +355,7 @@ async def test_native_model_delegates_lifecycle_to_bound_workers():
                 "backend": "native",
                 "executor": {"model": "tests.fake:Model"},
                 "model_path": "/models/pickscore",
+                "placement": {"devices": [0]},
             }
         ),
     )
@@ -344,6 +400,7 @@ async def test_native_model_can_stay_resident():
                 "offload": False,
                 "executor": {"model": "tests.fake:Model"},
                 "model_path": "/models/pickscore",
+                "placement": {"devices": [0]},
             }
         ),
     )
@@ -398,7 +455,7 @@ async def test_native_model_can_stay_resident():
                     "rollout": {"tensor_model_parallel_size": 2},
                 }
             },
-            "does not support engine resource fields",
+            "unsupported fields: rollout",
         ),
     ],
 )
@@ -445,7 +502,8 @@ def test_native_device_assignments_size_the_native_subpool(monkeypatch):
     manager = object.__new__(MultiRewardModelManager)
     manager.config = config
     manager.resource_pool = SimpleNamespace(world_size=8)
-    manager.native_device_assignments = manager._validate_native_device_assignments(list(config.reward.models.items()))
+    parsed = _parsed_models(config)
+    manager.native_device_assignments = manager._validate_native_device_assignments(parsed)
     observed = {}
 
     def fake_split(pool, sizes):
@@ -454,9 +512,7 @@ def test_native_device_assignments_size_the_native_subpool(monkeypatch):
         return ["native-pool", "unused-pool"]
 
     monkeypatch.setattr(reward_model_module, "split_resource_pool", fake_split)
-    engine_pools, native_pool = manager._split_model_resource_pools(
-        [], list(config.reward.models.items()), config.reward.reward_model
-    )
+    engine_pools, native_pool = manager._split_model_resource_pools([], parsed, config.reward.reward_model)
 
     assert observed == {"pool": manager.resource_pool, "sizes": [6, 2]}
     assert engine_pools == {}
@@ -593,6 +649,7 @@ def test_model_offload_must_be_boolean(offload):
                     "backend": "native",
                     "offload": offload,
                     "executor": {"model": "tests.fake:Model"},
+                    "placement": {"devices": [0]},
                 }
             ),
         )
