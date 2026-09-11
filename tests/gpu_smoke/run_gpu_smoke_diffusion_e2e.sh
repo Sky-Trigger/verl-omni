@@ -80,8 +80,10 @@ run_test 13 "MiniMax-H3 FlowGRPO T2VA trainer e2e" \
 
 run_qwen_image_edit_flowgrpo_e2e() {
     local model_path="${MODEL_PATH:-${HOME}/models/tiny-random/qwen-image-edit-plus}"
-    python tests/special_e2e/build_qwen_image_edit_plus_tiny_random.py \
-        --output-dir "${model_path}"
+    if ! python tests/special_e2e/build_qwen_image_edit_plus_tiny_random.py \
+        --output-dir "${model_path}"; then
+        return 1
+    fi
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" MODEL_PATH="${model_path}" \
         bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}"
 }
