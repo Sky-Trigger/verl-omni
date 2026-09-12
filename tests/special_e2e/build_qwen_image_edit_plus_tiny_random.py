@@ -42,12 +42,29 @@ from transformers import (
 )
 
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/models/tiny-random/qwen-image-edit-plus")
+_CHECKPOINT_METADATA_FILE = "tiny_checkpoint_metadata.json"
 
 _CHATML_TEMPLATE = (
     "{% for message in messages %}"
-    "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+    "{{ '<|im_start|>' + message['role'] + '\n' }}"
+    "{% if message['content'] is string %}"
+    "{{ message['content'] }}"
+    "{% else %}"
+    "{% for content in message['content'] %}"
+    "{% if content['type'] == 'text' %}"
+    "{{ content['text'] }}"
+    "{% elif content['type'] == 'image' %}"
+    "{{ '<|vision_start|><|image_pad|><|vision_end|>' }}"
+    "{% elif content['type'] == 'video' %}"
+    "{{ '<|vision_start|><|video_pad|><|vision_end|>' }}"
+    "{% endif %}"
     "{% endfor %}"
-    "{% if add_generation_prompt %}{{'<|im_start|>assistant\n'}}{% endif %}"
+    "{% endif %}"
+    "{{ '<|im_end|>\n' }}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\n' }}"
+    "{% endif %}"
 )
 
 _MM_EXTRA_SPECIAL_TOKENS = {
@@ -264,6 +281,24 @@ def _write_model_index(output_dir: str) -> None:
         json.dump(model_index, f, indent=2, sort_keys=True)
 
 
+def _write_checkpoint_metadata(output_dir: str) -> None:
+    """Record builder-owned assets so stale smoke checkpoints are rebuilt."""
+    metadata = {"format_version": 1, "chat_template": _CHATML_TEMPLATE}
+    with open(os.path.join(output_dir, _CHECKPOINT_METADATA_FILE), "w") as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
+
+
+def _checkpoint_is_current(output_dir: str) -> bool:
+    if not os.path.isfile(os.path.join(output_dir, "model_index.json")):
+        return False
+    try:
+        with open(os.path.join(output_dir, _CHECKPOINT_METADATA_FILE)) as f:
+            metadata = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return metadata == {"format_version": 1, "chat_template": _CHATML_TEMPLATE}
+
+
 def build(
     output_dir: str,
     *,
@@ -285,6 +320,7 @@ def build(
     _build_tiny_processor(tokenizer).save_pretrained(os.path.join(output_dir, "processor"))
     FlowMatchEulerDiscreteScheduler().save_pretrained(os.path.join(output_dir, "scheduler"))
     _write_model_index(output_dir)
+    _write_checkpoint_metadata(output_dir)
     return output_dir
 
 
@@ -298,7 +334,7 @@ def ensure_tiny_qwen_image_edit_checkpoint(
 ) -> str:
     """Build the tiny checkpoint only if it is not already present."""
     output_dir = os.path.expanduser(output_dir)
-    if skip_if_exists and os.path.isfile(os.path.join(output_dir, "model_index.json")):
+    if skip_if_exists and _checkpoint_is_current(output_dir):
         return output_dir
     return build(output_dir, hidden_size=hidden_size, seed=seed, dtype=dtype)
 
