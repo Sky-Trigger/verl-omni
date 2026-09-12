@@ -130,10 +130,12 @@ class NativeRewardExecutor:
 
 
 def build_engine_reward_executors(specs: dict[str, RewardModelSpec]) -> dict[str, EngineRewardExecutor]:
+    """Build worker-side router clients for engine-backed model specs."""
     return {name: EngineRewardExecutor(spec) for name, spec in specs.items() if is_engine_backend(spec.backend)}
 
 
 def build_native_reward_executors(specs: dict[str, RewardModelSpec]) -> dict[str, NativeRewardExecutor]:
+    """Build worker-local executors for native model specs."""
     return {name: NativeRewardExecutor(spec) for name, spec in specs.items() if spec.backend == "native"}
 
 

@@ -281,18 +281,22 @@ def get_reward_model_entries(config):
 
 
 def has_reward_models(config) -> bool:
+    """Return whether at least one named reward model is configured."""
     return bool(get_reward_model_entries(config))
 
 
 def is_engine_backend(backend: str | None) -> bool:
+    """Return whether a backend name selects the managed engine path."""
     return backend in _ENGINE_BACKENDS
 
 
 def has_engine_reward_models(config) -> bool:
+    """Return whether any configured named model uses the engine backend."""
     return any(is_engine_backend(model.get("backend")) for model in get_reward_model_entries(config).values())
 
 
 def has_native_reward_models(config) -> bool:
+    """Return whether any configured named model uses the native backend."""
     return any(model.get("backend") in _NATIVE_BACKENDS for model in get_reward_model_entries(config).values())
 
 
@@ -322,6 +326,7 @@ def validate_reward_model_terms(config) -> None:
 
 
 def reward_is_enabled(config) -> bool:
+    """Return whether either the legacy or named-model reward path is enabled."""
     reward_model = config.reward.get("reward_model", {})
     return bool(reward_model.get("enable", False) or has_reward_models(config))
 
@@ -332,6 +337,7 @@ def reward_role_required(config) -> bool:
 
 
 def reward_pool_is_separate(config) -> bool:
+    """Return whether reward models use the dedicated parent resource pool."""
     return bool(config.reward.reward_model.get("enable_resource_pool", False))
 
 
