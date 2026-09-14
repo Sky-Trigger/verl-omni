@@ -1,6 +1,12 @@
 # Named Reward Models
 
-Last updated: 09/12/2026
+Last updated: 09/14/2026
+
+> **Scope:** This is the `verl-omni` extension guide for named model-backed
+> rewards configured under `reward.models`. The upstream `verl` Reward Loop
+> guide describes the legacy single-model path based on
+> `reward.reward_model` and `reward.custom_reward_function`; its model-backed
+> setup is not the integration contract for new named reward models.
 
 `reward.models` lets one training job use one or more independently managed
 model-backed rewards. It supports an engine backend, a native backend, or both
