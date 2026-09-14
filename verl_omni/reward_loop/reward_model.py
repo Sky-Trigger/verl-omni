@@ -24,7 +24,7 @@ from omegaconf import OmegaConf
 from verl.experimental.reward_loop.reward_model import RewardModelManager
 from verl.single_controller.ray.base import split_resource_pool
 
-from .reward_model_config import (
+from verl_omni.workers.config.reward import (
     EngineRewardModelConfig,
     NativeRewardModelConfig,
     RewardModelSpec,

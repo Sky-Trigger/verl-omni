@@ -58,12 +58,6 @@ from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
-from verl_omni.reward_loop.reward_model_config import (
-    reward_is_enabled,
-    reward_pool_is_separate,
-    reward_role_required,
-    streaming_reward_enabled,
-)
 from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
@@ -89,6 +83,12 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_tq_batch_to_dataproto,
     put_dataproto_fields_to_tq,
     sort_diffusion_tq_keys,
+)
+from verl_omni.workers.config.reward import (
+    reward_is_enabled,
+    reward_pool_is_separate,
+    reward_role_required,
+    streaming_reward_enabled,
 )
 from verl_omni.workers.engine_workers import ActorRolloutRefWorker, resolve_teacher_infer_micro_batch_size
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding

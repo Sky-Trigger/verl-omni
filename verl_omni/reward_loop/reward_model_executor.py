@@ -24,7 +24,7 @@ from typing import Any
 import torch
 from verl.utils.device import get_device_id, get_device_name
 
-from .reward_model_config import RewardModelSpec, is_engine_backend
+from verl_omni.workers.config.reward import RewardModelSpec, is_engine_backend
 
 __all__ = [
     "EngineRewardExecutor",

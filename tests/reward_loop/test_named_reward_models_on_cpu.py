@@ -38,7 +38,11 @@ from verl_omni.reward_loop.reward_model import (
     NativeManagedRewardModel,
     _prepare_engine_config,
 )
-from verl_omni.reward_loop.reward_model_config import (
+from verl_omni.reward_loop.reward_model_executor import (
+    NativeRewardExecutor,
+    build_engine_reward_executors,
+)
+from verl_omni.workers.config.reward import (
     EngineRewardModelConfig,
     NativeRewardModelConfig,
     RewardModelSpec,
@@ -50,10 +54,6 @@ from verl_omni.reward_loop.reward_model_config import (
     reward_role_required,
     streaming_reward_enabled,
     validate_reward_model_terms,
-)
-from verl_omni.reward_loop.reward_model_executor import (
-    NativeRewardExecutor,
-    build_engine_reward_executors,
 )
 
 

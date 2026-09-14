@@ -34,51 +34,8 @@ accelerator_workers:
 # Each entry: path (str), name (str), weight (float).
 reward_functions: {}
 
-# Named reward models. A reward function uses the same-name model by default or
-# may reference another entry with ``model: <key>``. Backends are ``engine``
-# (vLLM through the existing verl RewardModelManager) and ``native``
-# (verl-omni worker-local model). The trainer selects one
-# parent global_pool or reward_pool through reward_model.enable_resource_pool;
-# MultiRewardModelManager splits that parent pool into disjoint engine and
-# native subpools. Native models share one parent native subpool, but each model
-# must explicitly claim its own native-pool bundle indices.
-# One index creates one full local model instance; this is replication, not TP.
-# The indices are relative to the native subpool (not physical CUDA/NPU IDs),
-# and cannot overlap between native models.
-# Every backend uses the same optional ``offload`` setting: true (default)
-# wakes before scoring and sleeps afterward; false keeps the model resident.
-# Native model example:
-#
-# models:
-#   quality:
-#     backend: native
-#     offload: true
-#     model_path: /models/quality
-#     placement:
-#       devices: [0, 1, 2, 3]
-#     executor:
-#       model: my_package.reward_model:QualityModel
-# Engine model example:
-#   judge:
-#     backend: engine
-#     offload: true
-#     n_gpus_per_node: 1
-#     nnodes: 1
-#     model_path: /models/judge
-#     rollout:
-#       name: vllm
-#       tensor_model_parallel_size: 1
-# reward_functions:
-#   quality:
-#     path: pkg://my_package.reward_score
-#     name: compute_quality_score
-#   judge:
-#     path: pkg://my_package.reward_score
-#     name: compute_judge_score
-# Existing router-based rewards (for example GenRM OCR) may also bind their
-# existing path/name function to a model; it receives that model's
-# ``reward_router_address`` and ``model_name`` instead of the legacy global
-# reward router.
+# Named reward models. See docs/algo/named_reward_models.md for configuration
+# and extension instructions.
 models: {}
 
 # Aggregation method for multi-reward. Only "weighted_sum" is supported.

@@ -25,7 +25,6 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
-from verl_omni.reward_loop.reward_model_config import reward_pool_is_separate, reward_role_required
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
@@ -34,6 +33,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
+from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
 
 
 def _count_controller_capture_ranges(profile_steps: list[int], profile_continuous_steps: bool) -> int:

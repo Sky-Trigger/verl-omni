@@ -19,7 +19,8 @@ import logging
 from verl import DataProto
 from verl.utils.import_utils import load_extern_object
 
-from ..reward_model_config import get_reward_model_entries, resolve_reward_model_name
+from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
+
 from .visual import VisualRewardManager, _validate_visual_response
 
 logger = logging.getLogger(__name__)

@@ -25,8 +25,7 @@ from verl.experimental.reward_loop.reward_loop import RewardLoopWorker
 from verl.protocol import DataProto, pad_dataproto_to_divisor
 from verl.trainer.ppo.reward import resolve_reward_manager_cls
 
-from .reward_model import MultiRewardModelManager
-from .reward_model_config import (
+from verl_omni.workers.config.reward import (
     accelerator_workers_enabled,
     get_reward_model_entries,
     has_reward_models,
@@ -34,6 +33,8 @@ from .reward_model_config import (
     streaming_reward_enabled,
     validate_reward_model_terms,
 )
+
+from .reward_model import MultiRewardModelManager
 from .reward_model_executor import (
     EngineRewardExecutor,
     NativeRewardExecutor,

@@ -54,7 +54,6 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
-from verl_omni.reward_loop.reward_model_config import reward_is_enabled, reward_role_required, streaming_reward_enabled
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
@@ -83,6 +82,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
+from verl_omni.workers.config.reward import reward_is_enabled, reward_role_required, streaming_reward_enabled
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 sys_logger = logging.getLogger(__name__)
