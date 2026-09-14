@@ -20,7 +20,7 @@ from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
 class PoolingRewardModelWorkerExtension(vLLMColocateWorkerExtension):
     """Keep verl's generation-only model patches out of pooling workers."""
     
-    # TODO(mike): This is temporary PickScore support. Remove this workaround
+    # TODO: This is temporary PickScore support. Remove this workaround
     # once upstream verl handles pooling reward models without applying its
     # generation-only model patch.
     # Related context: https://github.com/verl-project/verl/pull/7027
