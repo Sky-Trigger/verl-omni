@@ -19,9 +19,10 @@ from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
 
 class PoolingRewardModelWorkerExtension(vLLMColocateWorkerExtension):
     """Keep verl's generation-only model patches out of pooling workers."""
-
-    # TODO(mike): Remove this workaround once upstream verl skips its
-    # generation-only model patch for pooling reward workers. Related upstream
-    # pooling-RM context: https://github.com/verl-project/verl/pull/7027
+    
+    # TODO(mike): This is temporary PickScore support. Remove this workaround
+    # once upstream verl handles pooling reward models without applying its
+    # generation-only model patch.
+    # Related context: https://github.com/verl-project/verl/pull/7027
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
         del vocab_size, banned_token_ids
