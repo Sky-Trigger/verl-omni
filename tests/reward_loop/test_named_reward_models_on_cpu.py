@@ -31,7 +31,9 @@ from verl_omni.reward_loop import reward_model_executor as executor_module
 from verl_omni.reward_loop.reward_loop import (
     OmniRewardLoopManager,
     OmniRewardLoopWorker,
+    _validate_named_reward_manager_cls,
 )
+from verl_omni.reward_loop.reward_manager import MultiVisualRewardManager, VisualRewardManager
 from verl_omni.reward_loop.reward_model import (
     EngineManagedRewardModel,
     MultiRewardModelManager,
@@ -88,7 +90,7 @@ def test_mixed_engine_and_native_models_share_one_parent_pool(monkeypatch):
             "pickscore": {
                 "backend": "native",
                 "executor": {"model": "tests.fake:Model"},
-                "placement": {"devices": [0, 1, 2, 3]},
+                "placement": {"devices": [2, 3, 4, 5]},
             },
         }
     )
@@ -104,18 +106,19 @@ def test_mixed_engine_and_native_models_share_one_parent_pool(monkeypatch):
     def fake_split(pool, sizes):
         observed["pool"] = pool
         observed["sizes"] = sizes
-        return ["engine-pool", "native-pool", "unused-pool"]
+        return ["engine-pool", "unused-pool"]
 
     monkeypatch.setattr(reward_model_module, "split_resource_pool", fake_split)
-    engine_pools, native_pool = manager._split_model_resource_pools(
+    engine_pools, native_pools = manager._split_model_resource_pools(
         [("ocr", parsed["ocr"])],
         [("pickscore", parsed["pickscore"])],
         config.reward.reward_model,
     )
 
-    assert observed == {"pool": manager.resource_pool, "sizes": [2, 4, 4]}
+    assert observed == {"pool": manager.resource_pool, "sizes": [2, 8]}
     assert engine_pools == {"ocr": "engine-pool"}
-    assert native_pool == "native-pool"
+    assert native_pools["pickscore"].parent_resource_pool is manager.resource_pool
+    assert native_pools["pickscore"].bundle_indices == (2, 3, 4, 5)
 
 
 def test_multi_reward_model_manager_splits_parent_pool(monkeypatch):
@@ -235,6 +238,13 @@ def test_native_only_model_uses_parent_pool_and_batch_scoring():
     assert reward_is_enabled(config)
     assert reward_role_required(config)
     assert not streaming_reward_enabled(config)
+
+
+def test_named_models_require_explicit_multi_visual_reward_manager():
+    _validate_named_reward_manager_cls(MultiVisualRewardManager)
+
+    with pytest.raises(ValueError, match="currently requires.*MultiVisualRewardManager"):
+        _validate_named_reward_manager_cls(VisualRewardManager)
 
 
 def test_accelerator_worker_setting_keeps_the_legacy_alias():
@@ -480,22 +490,53 @@ def test_native_model_rejects_overlapping_device_assignments():
         }
     )
 
-    with pytest.raises(ValueError, match="overlaps index 1"):
+    with pytest.raises(ValueError, match="overlaps parent-pool index 1"):
+        MultiRewardModelManager._validate_native_device_assignments(_parsed_models(config))
+
+
+def test_native_model_rejects_engine_allocation_overlap():
+    config = _config(
+        {
+            "ocr": {"backend": "engine", "model_path": "/models/ocr"},
+            "pickscore": {
+                "backend": "native",
+                "executor": {"model": "tests.fake:Model"},
+                "placement": {"devices": [1, 2]},
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match=r"overlaps engine allocation.*indices \[1\]"):
         MultiRewardModelManager(config, resource_pool=SimpleNamespace(world_size=8))
 
 
-def test_native_device_assignments_size_the_native_subpool(monkeypatch):
+def test_native_model_rejects_parent_pool_out_of_range():
     config = _config(
         {
             "pickscore": {
                 "backend": "native",
                 "executor": {"model": "tests.fake:Model"},
-                "placement": {"devices": [0, 1]},
+                "placement": {"devices": [7, 8]},
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="parent reward pool has only 8 bundles"):
+        MultiRewardModelManager(config, resource_pool=SimpleNamespace(world_size=8))
+
+
+def test_native_models_receive_independent_indexed_pools(monkeypatch):
+    config = _config(
+        {
+            "pickscore": {
+                "backend": "native",
+                "executor": {"model": "tests.fake:Model"},
+                "placement": {"devices": [2, 5]},
             },
             "hpsv3": {
                 "backend": "native",
                 "executor": {"model": "tests.fake:HpsModel"},
-                "placement": {"devices": [4, 5]},
+                "placement": {"devices": [4, 7]},
             },
         }
     )
@@ -504,20 +545,21 @@ def test_native_device_assignments_size_the_native_subpool(monkeypatch):
     manager.resource_pool = SimpleNamespace(world_size=8)
     parsed = _parsed_models(config)
     manager.native_device_assignments = manager._validate_native_device_assignments(parsed)
-    observed = {}
+    monkeypatch.setattr(
+        reward_model_module,
+        "split_resource_pool",
+        lambda *args: pytest.fail("native indexed pools must not split the parent pool"),
+    )
+    engine_pools, native_pools = manager._split_model_resource_pools([], parsed, config.reward.reward_model)
 
-    def fake_split(pool, sizes):
-        observed["pool"] = pool
-        observed["sizes"] = sizes
-        return ["native-pool", "unused-pool"]
-
-    monkeypatch.setattr(reward_model_module, "split_resource_pool", fake_split)
-    engine_pools, native_pool = manager._split_model_resource_pools([], parsed, config.reward.reward_model)
-
-    assert observed == {"pool": manager.resource_pool, "sizes": [6, 2]}
     assert engine_pools == {}
-    assert native_pool == "native-pool"
-    assert manager.native_device_assignments == {"pickscore": (0, 1), "hpsv3": (4, 5)}
+    assert native_pools["pickscore"].parent_resource_pool is manager.resource_pool
+    assert native_pools["pickscore"].bundle_indices == (2, 5)
+    assert native_pools["pickscore"].world_size == 2
+    assert native_pools["hpsv3"].parent_resource_pool is manager.resource_pool
+    assert native_pools["hpsv3"].bundle_indices == (4, 7)
+    assert native_pools["hpsv3"].world_size == 2
+    assert manager.native_device_assignments == {"pickscore": (2, 5), "hpsv3": (4, 7)}
 
 
 def test_native_models_create_isolated_worker_groups(monkeypatch):
@@ -563,8 +605,8 @@ def test_native_models_create_isolated_worker_groups(monkeypatch):
     observed = []
     observed_bindings = []
 
-    def create_native_workers(group_config, group_specs, bundle_indices, name_prefix):
-        observed.append((group_config, group_specs, bundle_indices, name_prefix))
+    def create_native_workers(group_config, group_specs, model_name, name_prefix):
+        observed.append((group_config, group_specs, model_name, name_prefix))
         return [f"{name_prefix}-worker"]
 
     monkeypatch.setattr("verl_omni.reward_loop.reward_loop.ray.remote", lambda cls: cls)
@@ -582,12 +624,11 @@ def test_native_models_create_isolated_worker_groups(monkeypatch):
         "native_reward_loop_worker_hpsv3-worker",
     ]
     observed_groups = [
-        (set(group_specs), tuple(bundle_indices), name_prefix)
-        for _, group_specs, bundle_indices, name_prefix in observed
+        (set(group_specs), model_name, name_prefix) for _, group_specs, model_name, name_prefix in observed
     ]
     assert observed_groups == [
-        ({"pickscore"}, (0, 1), "native_reward_loop_worker_pickscore"),
-        ({"hpsv3"}, (2, 3), "native_reward_loop_worker_hpsv3"),
+        ({"pickscore"}, "pickscore", "native_reward_loop_worker_pickscore"),
+        ({"hpsv3"}, "hpsv3", "native_reward_loop_worker_hpsv3"),
     ]
     assert [set(group_config.reward.reward_functions) for group_config, *_ in observed] == [
         {"pickscore"},
@@ -967,14 +1008,14 @@ def test_model_manager_rejects_existing_and_named_models():
 def test_native_model_requires_allocated_native_resource_pool():
     manager = object.__new__(OmniRewardLoopManager)
     manager.multi_reward_model_manager = SimpleNamespace(
-        native_resource_pool=None,
+        native_resource_pools={},
     )
 
-    with pytest.raises(ValueError, match="require an allocated native resource pool"):
+    with pytest.raises(ValueError, match="requires an allocated resource pool"):
         manager._create_native_workers(
             config=SimpleNamespace(),
             specs={},
-            bundle_indices=[0],
+            model_name="pickscore",
             name_prefix="native_reward_loop_worker_pickscore",
         )
 
@@ -1075,6 +1116,7 @@ async def test_named_model_groups_score_concurrently():
 async def test_async_compute_rm_score_brackets_scoring_with_one_lifecycle():
     calls = []
     manager = object.__new__(OmniRewardLoopManager)
+    manager._score_lock = asyncio.Lock()
 
     async def wake_up():
         calls.append("wake_up")
@@ -1097,3 +1139,43 @@ async def test_async_compute_rm_score_brackets_scoring_with_one_lifecycle():
     data = object()
     assert await manager.async_compute_rm_score(data) is data
     assert calls == ["wake_up", "score", "sleep"]
+
+
+@pytest.mark.asyncio
+async def test_async_compute_rm_score_serializes_lifecycle_brackets():
+    calls = []
+    first_score_entered = asyncio.Event()
+    release_first_score = asyncio.Event()
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._score_lock = asyncio.Lock()
+
+    async def wake_up():
+        calls.append("wake_up")
+
+    async def sleep():
+        calls.append("sleep")
+
+    async def score(data):
+        calls.append(f"score:{data}")
+        if data == "first":
+            first_score_entered.set()
+            await release_first_score.wait()
+        return data
+
+    manager.multi_reward_model_manager = SimpleNamespace(
+        models={"native": object()},
+        wake_up=wake_up,
+        sleep=sleep,
+    )
+    manager._compute_named_model_scores = score
+
+    first = asyncio.create_task(manager.async_compute_rm_score("first"))
+    await first_score_entered.wait()
+    second = asyncio.create_task(manager.async_compute_rm_score("second"))
+    await asyncio.sleep(0)
+
+    assert calls == ["wake_up", "score:first"]
+
+    release_first_score.set()
+    assert await asyncio.gather(first, second) == ["first", "second"]
+    assert calls == ["wake_up", "score:first", "sleep", "wake_up", "score:second", "sleep"]

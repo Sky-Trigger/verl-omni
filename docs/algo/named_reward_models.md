@@ -21,6 +21,17 @@ The framework deliberately separates inference from scoring:
 
 PickScore is an example of this contract, not a special case in the framework.
 
+Named models currently use the visual sample contract. Select the manager
+explicitly; the framework does not rewrite a user-provided manager:
+
+```yaml
+reward:
+  reward_manager:
+    name: MultiVisualRewardManager
+```
+
+Audio and other modality-specific multi-reward managers are follow-up work.
+
 ## Backend selection
 
 | Backend | Use it when | Reward-function arguments |
@@ -226,6 +237,14 @@ reward:
 framework supplies `model_path` and the worker-local `device` unless those
 arguments are already present in `executor.kwargs`.
 
+Each native model entry is one deployment. Different checkpoints or lifecycle
+policies require different named deployments; multiple reward functions may
+share one deployment through their `model` field. In this PR, every
+`placement.devices` entry creates one complete replica of that deployment.
+Future FSDP support will need an explicit replica-group schema because a flat
+device list cannot distinguish full replicas from ranks within one sharded
+replica.
+
 ### Wrap a Transformers model for native mode
 
 A Transformers checkpoint does not need an inference server. Add a small model
@@ -297,8 +316,8 @@ model sleeps.
 ## Mix engine and native models
 
 Engine and native models can be scored in the same job. The following dedicated
-four-device parent pool is split into a two-device engine allocation followed
-by a two-device native subpool:
+four-device parent pool is split into a two-device engine allocation and an
+independent two-device native subpool:
 
 ```yaml
 reward:
@@ -324,7 +343,7 @@ reward:
       offload: true
       model_path: /models/quality
       placement:
-        devices: [0, 1]
+        devices: [2, 3]
       executor:
         model: my_package.reward_model:TransformersRewardModel
 
@@ -339,11 +358,13 @@ reward:
       weight: 0.6
 ```
 
-All engine allocations are carved out first in configuration order. The native
-models then share one native subpool. `placement.devices` are bundle indices
-relative to that native subpool, not physical CUDA/NPU IDs and not tensor
-parallel ranks. Each index creates one complete native replica; indices cannot
-overlap between native models.
+All engine allocations are carved out first in configuration order. Each
+native model then receives an independent subpool at the parent-pool bundle
+indices listed in `placement.devices`. These are global indices within the
+trainer-selected parent resource pool, not physical CUDA/NPU IDs and not
+tensor-parallel ranks. Indices may be non-contiguous, but cannot overlap another
+native model or the engine allocation. Each index creates one complete native
+replica in this PR; it does not identify a rank in a sharded model group.
 
 An engine model's world size is
 `replicas * TP * DP * PP`. If `n_gpus_per_node` and `nnodes` are set on that

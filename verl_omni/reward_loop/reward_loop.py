@@ -45,6 +45,16 @@ from .reward_model_executor import (
 logger = logging.getLogger(__name__)
 
 
+def _validate_named_reward_manager_cls(reward_manager_cls) -> None:
+    from .reward_manager.multi import MultiVisualRewardManager
+
+    if not issubclass(reward_manager_cls, MultiVisualRewardManager):
+        raise ValueError(
+            "reward.models currently requires reward.reward_manager.name=MultiVisualRewardManager; "
+            f"got {reward_manager_cls.__name__!r}. Support for other modalities is follow-up work."
+        )
+
+
 class OmniRewardLoopWorker(RewardLoopWorker):
     """RewardLoopWorker with named engine and native reward executors."""
 
@@ -104,9 +114,13 @@ class OmniRewardLoopManager(RewardLoopManager):
     """
 
     def __init__(self, config, rm_resource_pool=None, accelerator_resource_pool=None):
+        self._score_lock = asyncio.Lock()
         self.accelerator_resource_pool = accelerator_resource_pool
+        named_reward_manager_cls = None
         if has_reward_models(config):
             validate_reward_model_terms(config)
+            named_reward_manager_cls = resolve_reward_manager_cls(config)
+            _validate_named_reward_manager_cls(named_reward_manager_cls)
         self.multi_reward_model_manager = MultiRewardModelManager(
             config,
             # The trainer maps Role.RewardModel to global_pool or reward_pool.
@@ -125,13 +139,10 @@ class OmniRewardLoopManager(RewardLoopManager):
             if self.multi_reward_model_manager.models and not config.reward.get("reward_functions"):
                 raise ValueError("reward.models requires non-empty reward.reward_functions")
             self.config = config
-            if self.multi_reward_model_manager.models:
-                with open_dict(config.reward.reward_manager):
-                    config.reward.reward_manager.name = "MultiVisualRewardManager"
             self.reward_model_manager = None
             self.reward_router_address = None
             self.reward_loop_workers_class = ray.remote(OmniRewardLoopWorker)
-            self.reward_manager_cls = resolve_reward_manager_cls(config)
+            self.reward_manager_cls = named_reward_manager_cls or resolve_reward_manager_cls(config)
             self._init_reward_loop_workers()
         else:
             super().__init__(config=config, rm_resource_pool=rm_resource_pool)
@@ -178,7 +189,7 @@ class OmniRewardLoopManager(RewardLoopManager):
                 workers = self._create_native_workers(
                     group_config,
                     {model_name: specs[model_name]},
-                    placement,
+                    model_name,
                     f"native_reward_loop_worker_{model_name}",
                 )
                 self._register_worker_group(model_name, workers, group_config)
@@ -244,19 +255,18 @@ class OmniRewardLoopManager(RewardLoopManager):
             for index in range(config.reward.num_workers)
         ]
 
-    def _create_native_workers(self, config, specs, bundle_indices, name_prefix):
+    def _create_native_workers(self, config, specs, model_name, name_prefix):
         from .accelerator_reward_workers import build_accelerator_reward_workers
 
-        resource_pool = self.multi_reward_model_manager.native_resource_pool
+        resource_pool = self.multi_reward_model_manager.native_resource_pools.get(model_name)
         if resource_pool is None:
-            raise ValueError("Native reward models require an allocated native resource pool")
+            raise ValueError(f"Native reward model {model_name!r} requires an allocated resource pool")
         return build_accelerator_reward_workers(
             config=config,
             reward_loop_workers_class=self.reward_loop_workers_class,
             accelerator_resource_pool=resource_pool,
             reward_router_address=self.reward_router_address,
             reward_model_specs=specs,
-            bundle_indices=list(bundle_indices),
             worker_name_prefix=name_prefix,
         )
 
@@ -274,20 +284,21 @@ class OmniRewardLoopManager(RewardLoopManager):
         """Score named reward models without blocking the caller's event loop."""
         if not self.multi_reward_model_manager.models:
             return await asyncio.to_thread(super().compute_rm_score, data)
-        scoring_error = None
-        try:
-            await self.multi_reward_model_manager.wake_up()
-            return await self._compute_named_model_scores(data)
-        except BaseException as exc:
-            scoring_error = exc
-            raise
-        finally:
+        async with self._score_lock:
+            scoring_error = None
             try:
-                await self.multi_reward_model_manager.sleep()
-            except Exception:
-                if scoring_error is None:
-                    raise
-                logger.exception("Failed to sleep reward models after scoring failed")
+                await self.multi_reward_model_manager.wake_up()
+                return await self._compute_named_model_scores(data)
+            except BaseException as exc:
+                scoring_error = exc
+                raise
+            finally:
+                try:
+                    await self.multi_reward_model_manager.sleep()
+                except Exception:
+                    if scoring_error is None:
+                        raise
+                    logger.exception("Failed to sleep reward models after scoring failed")
 
     async def _compute_named_model_scores(self, data: DataProto) -> DataProto:
         requests_by_group = {}

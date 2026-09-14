@@ -18,9 +18,26 @@ It binds workers to bundles in a trainer-selected accelerator pool. Both
 native named models and existing custom reward functions use this mechanism.
 """
 
+from typing import Any
+
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from verl.plugin.platform import get_platform
 from verl.utils.device import get_device_name
+
+
+class _IndexedResourcePool:
+    """A per-deployment view of arbitrary bundles in one parent resource pool."""
+
+    def __init__(self, parent_resource_pool: Any, bundle_indices: list[int] | tuple[int, ...]) -> None:
+        self.parent_resource_pool = parent_resource_pool
+        self.bundle_indices = tuple(bundle_indices)
+
+    @property
+    def world_size(self) -> int:
+        return len(self.bundle_indices)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.parent_resource_pool, name)
 
 
 def build_accelerator_reward_workers(
@@ -56,17 +73,37 @@ def build_accelerator_reward_workers(
         raise ValueError(
             "Accelerator reward workers require resource_pool.max_colocate_count >= 2 when colocated with ActorRollout"
         )
-    placement_groups = accelerator_resource_pool.get_placement_groups(device_name=get_device_name())
+    indexed_bundles = getattr(accelerator_resource_pool, "bundle_indices", None)
+    parent_resource_pool = getattr(
+        accelerator_resource_pool,
+        "parent_resource_pool",
+        accelerator_resource_pool,
+    )
+    placement_groups = parent_resource_pool.get_placement_groups(device_name=get_device_name())
     # SubRayResourcePool keeps the original placement groups and records the
     # flat bundle offset. Respect it when selecting from a native subpool.
     start_bundle_index = getattr(accelerator_resource_pool, "start_bundle_index", None)
-    if start_bundle_index is None:
+    if indexed_bundles is not None:
+        all_bundles = [
+            (placement_group, bundle_index)
+            for placement_group, local_world_size in zip(
+                placement_groups,
+                parent_resource_pool.store,
+                strict=True,
+            )
+            for bundle_index in range(local_world_size)
+        ]
+        parent_start = getattr(parent_resource_pool, "start_bundle_index", 0)
+        parent_world_size = getattr(parent_resource_pool, "world_size", sum(parent_resource_pool.store))
+        parent_bundles = all_bundles[parent_start : parent_start + parent_world_size]
+        bundles = [parent_bundles[index] for index in indexed_bundles]
+    elif start_bundle_index is None:
         # Preserve the legacy round-robin node ordering for existing custom
         # accelerator reward functions.
         bundles = [
             (placement_group, bundle_index)
-            for bundle_index in range(max(accelerator_resource_pool.store))
-            for placement_group, local_world_size in zip(placement_groups, accelerator_resource_pool.store, strict=True)
+            for bundle_index in range(max(parent_resource_pool.store))
+            for placement_group, local_world_size in zip(placement_groups, parent_resource_pool.store, strict=True)
             if bundle_index < local_world_size
         ]
     else:
@@ -76,7 +113,7 @@ def build_accelerator_reward_workers(
         # counts (unlike the former divmod(store[0]) implementation).
         all_bundles = [
             (placement_group, bundle_index)
-            for placement_group, local_world_size in zip(placement_groups, accelerator_resource_pool.store, strict=True)
+            for placement_group, local_world_size in zip(placement_groups, parent_resource_pool.store, strict=True)
             for bundle_index in range(local_world_size)
         ]
         bundles = all_bundles[start_bundle_index : start_bundle_index + accelerator_resource_pool.world_size]

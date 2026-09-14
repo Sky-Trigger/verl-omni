@@ -100,7 +100,7 @@ bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh \
 
 The NPU recipe uses the synchronous V1 diffusion trainer and a named native
 PickScore model. Its `placement.devices` list assigns one full PickScore
-model worker to each native-pool bundle:
+model worker to each selected parent-pool bundle:
 
 ```bash
 WORKSPACE=$PWD \

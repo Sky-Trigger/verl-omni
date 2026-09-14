@@ -160,6 +160,27 @@ def test_accelerator_reward_workers_allow_explicit_native_bundle_indices(monkeyp
     assert all(worker.args[1:] == ("router", {"pickscore": "spec"}) for worker in workers)
 
 
+def test_accelerator_reward_workers_respect_indexed_pool_global_bundles(monkeypatch):
+    parent_pool = _FakeResourcePool()
+    resource_pool = worker_module._IndexedResourcePool(parent_pool, [0, 2])
+    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
+    monkeypatch.setattr(
+        worker_module,
+        "get_platform",
+        lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "PlacementGroupSchedulingStrategy",
+        lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
+    )
+
+    workers = _build_workers(2, resource_pool)
+
+    assert resource_pool.world_size == 2
+    assert [worker.options["scheduling_strategy"] for worker in workers] == [("pg0", 0), ("pg1", 0)]
+
+
 def test_accelerator_reward_workers_reject_invalid_explicit_bundle_indices():
     with pytest.raises(ValueError, match="bundle index 3 exceeds"):
         _build_selected_workers([3], _FakeResourcePool())

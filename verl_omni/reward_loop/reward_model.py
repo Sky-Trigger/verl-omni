@@ -34,6 +34,8 @@ from verl_omni.workers.config.reward import (
     to_mapping,
 )
 
+from .accelerator_reward_workers import _IndexedResourcePool
+
 __all__ = [
     "EngineManagedRewardModel",
     "ManagedRewardModel",
@@ -54,7 +56,7 @@ class MultiRewardModelManager:
         self.resource_pool = resource_pool
         self.models: dict[str, ManagedRewardModel] = {}
         self.engine_resource_pools: dict[str, Any] = {}
-        self.native_resource_pool = None
+        self.native_resource_pools: dict[str, Any] = {}
 
         entries = [
             (name, parse_reward_model_config(name, model)) for name, model in get_reward_model_entries(config).items()
@@ -65,7 +67,7 @@ class MultiRewardModelManager:
         native_entries = [(name, model) for name, model in entries if isinstance(model, NativeRewardModelConfig)]
 
         self.native_device_assignments = self._validate_native_device_assignments(native_entries)
-        engine_pools, self.native_resource_pool = self._split_model_resource_pools(
+        engine_pools, self.native_resource_pools = self._split_model_resource_pools(
             engine_entries, native_entries, base_config
         )
         self.engine_resource_pools = engine_pools
@@ -118,14 +120,14 @@ class MultiRewardModelManager:
     def _validate_native_device_assignments(
         native_entries: list[tuple[str, NativeRewardModelConfig]],
     ) -> dict[str, tuple[int, ...]]:
-        """Validate only cross-model placement overlap."""
+        """Validate that parent-pool bundle indices do not overlap across native models."""
         assignments: dict[str, tuple[int, ...]] = {}
         claimed_devices: dict[int, str] = {}
         for name, model in native_entries:
             for device in model.placement.devices:
                 if device in claimed_devices:
                     raise ValueError(
-                        f"Native reward model {name!r} placement.devices overlaps index {device} "
+                        f"Native reward model {name!r} placement.devices overlaps parent-pool index {device} "
                         f"already assigned to {claimed_devices[device]!r}"
                     )
                 claimed_devices[device] = name
@@ -139,37 +141,45 @@ class MultiRewardModelManager:
 
     def _split_model_resource_pools(self, engine_entries, native_entries, base_config):
         if not engine_entries and not native_entries:
-            return {}, None
+            return {}, {}
         if self.resource_pool is None:
             raise ValueError("Named reward models require a parent resource pool selected by the trainer")
 
-        engine_requested_sizes = []
-        for _, model in engine_entries:
-            engine_requested_sizes.append(model.requested_resource_size(base_config))
-
-        native_requested = 0
-        if native_entries:
-            native_requested = (
-                max(device for devices in self.native_device_assignments.values() for device in devices) + 1
-            )
-
-        requested_total = sum(engine_requested_sizes) + native_requested
-        if requested_total > self.resource_pool.world_size:
+        engine_requested_sizes = [model.requested_resource_size(base_config) for _, model in engine_entries]
+        engine_requested = sum(engine_requested_sizes)
+        if engine_requested > self.resource_pool.world_size:
             raise ValueError(
-                f"Named reward models request {requested_total} devices, but the parent reward pool has only "
+                f"Named reward models request {engine_requested} devices, but the parent reward pool has only "
                 f"{self.resource_pool.world_size}"
             )
 
-        split_sizes = list(engine_requested_sizes)
-        if native_requested:
-            split_sizes.append(native_requested)
-        if requested_total < self.resource_pool.world_size:
-            split_sizes.append(self.resource_pool.world_size - requested_total)
-        sub_pools = split_resource_pool(self.resource_pool, split_sizes)
-        engine_count = len(engine_entries)
-        engine_pools = {name: pool for (name, _), pool in zip(engine_entries, sub_pools[:engine_count], strict=True)}
-        native_pool = sub_pools[engine_count] if native_requested else None
-        return engine_pools, native_pool
+        native_pools = {}
+        for name, _ in native_entries:
+            devices = self.native_device_assignments[name]
+            highest_device = max(devices)
+            if highest_device >= self.resource_pool.world_size:
+                raise ValueError(
+                    f"Native reward model {name!r} placement.devices contains parent-pool index {highest_device}, "
+                    f"but the parent reward pool has only {self.resource_pool.world_size} bundles"
+                )
+            overlapping_engine_devices = [device for device in devices if device < engine_requested]
+            if overlapping_engine_devices:
+                raise ValueError(
+                    f"Native reward model {name!r} placement.devices overlaps engine allocation at parent-pool "
+                    f"indices {overlapping_engine_devices}"
+                )
+            native_pools[name] = _IndexedResourcePool(self.resource_pool, devices)
+
+        engine_pools = {}
+        if engine_requested_sizes:
+            split_sizes = list(engine_requested_sizes)
+            if engine_requested < self.resource_pool.world_size:
+                split_sizes.append(self.resource_pool.world_size - engine_requested)
+            sub_pools = split_resource_pool(self.resource_pool, split_sizes)
+            engine_pools = {
+                name: pool for (name, _), pool in zip(engine_entries, sub_pools[: len(engine_entries)], strict=True)
+            }
+        return engine_pools, native_pools
 
 
 class ManagedRewardModel(ABC):

@@ -52,7 +52,7 @@ _NATIVE_BACKENDS = {"native"}
 
 @dataclass
 class RewardModelPlacementConfig(BaseConfig):
-    """Placement-group bundle indices assigned to one native reward model."""
+    """Bundle indices in the trainer-selected parent resource pool."""
 
     devices: list[int] = field(default_factory=list)
 
@@ -69,7 +69,7 @@ class RewardModelPlacementConfig(BaseConfig):
         placement = to_mapping(value)
         _reject_unknown_fields(name, placement, {"devices"}, prefix="placement.")
         if "devices" not in placement:
-            raise ValueError(f"Native reward model {name!r} requires placement.devices as native-pool bundle indices")
+            raise ValueError(f"Native reward model {name!r} requires placement.devices as parent-pool bundle indices")
         try:
             return cls(devices=placement["devices"])
         except (TypeError, ValueError) as exc:

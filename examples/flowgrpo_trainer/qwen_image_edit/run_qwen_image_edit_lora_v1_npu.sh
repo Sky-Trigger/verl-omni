@@ -10,7 +10,7 @@ pickscore_model_path=${PICKSCORE_MODEL_PATH:?PICKSCORE_MODEL_PATH must be set}
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
-# Native-pool bundle indices. Each entry loads one complete PickScore model;
+# Parent-pool bundle indices. Each entry loads one complete PickScore model;
 # these are not physical NPU IDs and are not tensor-parallel ranks.
 NATIVE_REWARD_DEVICES=${NATIVE_REWARD_DEVICES:-"[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]"}
 REWARD_OFFLOAD=${REWARD_OFFLOAD:-true}
@@ -86,6 +86,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     reward.reward_model.enable=False \
+    reward.reward_manager.name=MultiVisualRewardManager \
     +reward.models.pickscore.backend=native \
     +reward.models.pickscore.offload=$REWARD_OFFLOAD \
     +reward.models.pickscore.model_path=$pickscore_model_path \

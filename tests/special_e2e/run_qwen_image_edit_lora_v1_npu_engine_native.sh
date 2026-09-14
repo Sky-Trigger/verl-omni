@@ -11,9 +11,9 @@ pickscore_model_path=${PICKSCORE_MODEL_PATH:-yuvalkirstain/PickScore_v1}
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 ENGINE_REWARD_NPUS=${ENGINE_REWARD_NPUS:-8}
-# Native-pool bundle indices. These are relative to the native subpool, not
-# physical NPU IDs or tensor-parallel ranks.
-NATIVE_REWARD_DEVICES=${NATIVE_REWARD_DEVICES:-"[0,1,2,3,4,5,6,7]"}
+# Parent-pool bundle indices. The engine allocation occupies indices 0-7 by
+# default; these are not physical NPU IDs or tensor-parallel ranks.
+NATIVE_REWARD_DEVICES=${NATIVE_REWARD_DEVICES:-"[8,9,10,11,12,13,14,15]"}
 REWARD_OFFLOAD=${REWARD_OFFLOAD:-true}
 PICKSCORE_LOGIT_SCALE=${PICKSCORE_LOGIT_SCALE:-98.86447}
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
@@ -89,6 +89,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     reward.reward_model.enable=False \
     reward.reward_model.enable_resource_pool=False \
+    reward.reward_manager.name=MultiVisualRewardManager \
     +reward.models.engine_model.backend=engine \
     +reward.models.engine_model.offload=$REWARD_OFFLOAD \
     +reward.models.engine_model.model_path=$pickscore_model_path \
