@@ -70,7 +70,7 @@ def test_colocate_reward_keeps_trajectory_fields(monkeypatch):
 
     assert "all_timesteps" in captured["data"].batch
     assert "rm_scores" in captured["data"].batch
-    assert checkpoint_calls == ["sleep"]
+    assert checkpoint_calls == []
 
 
 def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):
@@ -121,7 +121,7 @@ def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):
     with pytest.raises(_Stop):
         trainer._train_sampled_batch({}, {}, object())
 
-    assert calls == ["sleep", "reward", "old_log_prob", "advantage", "update_actor"]
+    assert calls == ["reward", "old_log_prob", "advantage", "update_actor"]
 
 
 def test_colocate_reward_wakes_rollout_mid_cycle_in_async_mode(monkeypatch):

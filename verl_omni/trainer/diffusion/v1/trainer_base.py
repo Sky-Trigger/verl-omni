@@ -381,8 +381,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
-                # Free rollout-engine GPU memory so the colocated RM fits.
-                self.checkpoint_manager.sleep_replicas()
+                # Sync sampling hooks already put colocated rollout replicas to
+                # sleep. Sleeping them again can unmap the same accelerator
+                # memory twice. Async modes still need the explicit mid-cycle
+                # sleep because they do not share the sync hook guarantee.
+                if self.trainer_mode != "sync":
+                    self.checkpoint_manager.sleep_replicas()
                 data = data.union(self._compute_reward_colocate(data))
                 if self.trainer_mode != "sync":
                     # Async modes have no guaranteed per-step wake of the
