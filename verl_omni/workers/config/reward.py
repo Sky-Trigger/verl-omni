@@ -145,14 +145,12 @@ class EngineRewardModelConfig(RewardModelConfig):
             _validate_positive_int(self.nnodes, f"Engine reward model {self.name!r} nnodes")
         if not isinstance(self.rollout, dict):
             raise TypeError(f"Engine reward model {self.name!r} rollout must be a mapping")
-        # These existing rollout switches are accepted as aliases for the
-        # backend-neutral offload field, but conflicting values fail early.
-        alias_values = [self.rollout[key] for key in ("free_cache_engine", "enable_sleep_mode") if key in self.rollout]
-        values = ([self.offload] if self.offload is not None else []) + alias_values
-        if any(not isinstance(value, bool) for value in values):
-            raise ValueError("Reward model offload must be a boolean")
-        if len(set(values)) > 1:
-            raise ValueError("Reward model offload conflicts with rollout sleep settings")
+        lifecycle_aliases = sorted(set(self.rollout) & {"free_cache_engine", "enable_sleep_mode"})
+        if lifecycle_aliases:
+            raise ValueError(
+                f"Engine reward model {self.name!r} must configure lifecycle with offload; "
+                f"remove rollout settings {lifecycle_aliases}"
+            )
 
     @classmethod
     def from_mapping(cls, name: str, value) -> EngineRewardModelConfig:
@@ -177,12 +175,6 @@ class EngineRewardModelConfig(RewardModelConfig):
             nnodes=model.get("nnodes"),
             rollout=to_mapping(model.get("rollout")),
         )
-
-    @property
-    def resolved_offload(self) -> bool:
-        alias_values = [self.rollout[key] for key in ("free_cache_engine", "enable_sleep_mode") if key in self.rollout]
-        values = ([self.offload] if self.offload is not None else []) + alias_values
-        return values[0] if values else True
 
     def rollout_world_size(self, base_config) -> int:
         base_rollout = to_mapping(base_config.get("rollout"))

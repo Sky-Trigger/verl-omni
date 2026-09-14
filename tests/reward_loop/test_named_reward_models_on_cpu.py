@@ -696,16 +696,17 @@ def test_model_offload_must_be_boolean(offload):
         )
 
 
-def test_engine_offload_rejects_conflicting_legacy_sleep_setting():
+@pytest.mark.parametrize("setting", ["free_cache_engine", "enable_sleep_mode"])
+def test_engine_offload_rejects_legacy_sleep_aliases(setting):
     config = _config()
-    with pytest.raises(ValueError, match="conflicts with rollout sleep settings"):
+    with pytest.raises(ValueError, match="must configure lifecycle with offload"):
         _prepare_engine_config(
             OmegaConf.create(
                 {
                     "backend": "engine",
                     "offload": False,
                     "model_path": "/models/clip",
-                    "rollout": {"free_cache_engine": True},
+                    "rollout": {setting: True},
                 }
             ),
             config.reward.reward_model,
@@ -726,7 +727,7 @@ def test_pooling_engine_uses_pooling_safe_worker_extension():
     )
 
     assert engine_config.rollout.engine_kwargs.vllm.worker_extension_cls == (
-        "verl_omni.reward_loop.vllm_worker.PoolingRewardModelWorkerExtension"
+        "verl_omni.workers.rollout.vllm_rollout.pooling_utils.PoolingRewardModelWorkerExtension"
     )
 
 
@@ -1025,7 +1026,11 @@ async def test_named_model_groups_merge_scores_and_extra_info():
     class _Worker:
         def __init__(self, outputs):
             self._outputs = outputs
-            self.compute_score_batch = SimpleNamespace(remote=lambda data: self._outputs[: len(data)])
+
+            async def compute(data):
+                return self._outputs[: len(data)]
+
+            self.compute_score_batch = SimpleNamespace(remote=compute)
 
     class _RewardManager:
         @staticmethod

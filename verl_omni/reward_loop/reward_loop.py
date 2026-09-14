@@ -13,7 +13,6 @@
 # limitations under the License.
 import asyncio
 import copy
-import inspect
 import logging
 
 import numpy as np
@@ -95,12 +94,6 @@ class OmniRewardLoopWorker(RewardLoopWorker):
             raise ValueError(f"Worker has no native reward model {model_name!r}") from exc
         await executor.sleep()
 
-    async def close(self):
-        await self._sleep_native_reward_executors()
-
-    async def _sleep_native_reward_executors(self) -> None:
-        await asyncio.gather(*(executor.sleep() for executor in self.native_reward_executors.values()))
-
 
 class OmniRewardLoopManager(RewardLoopManager):
     """RewardLoopManager that can start/stop the profiler on the reward-model rollout servers.
@@ -131,11 +124,6 @@ class OmniRewardLoopManager(RewardLoopManager):
         if self.multi_reward_model_manager.models or use_accelerator_workers:
             if use_accelerator_workers and config.reward.reward_model.get("enable", False):
                 raise ValueError("Accelerator reward workers cannot be combined with reward.reward_model.enable=True")
-            if config.reward.reward_model.get("enable", False):
-                raise ValueError(
-                    "Use reward.models for named model-backed rewards; "
-                    "reward.reward_model.enable cannot be combined with reward.models."
-                )
             if self.multi_reward_model_manager.models and not config.reward.get("reward_functions"):
                 raise ValueError("reward.models requires non-empty reward.reward_functions")
             self.config = config
@@ -310,7 +298,7 @@ class OmniRewardLoopManager(RewardLoopManager):
             requests_by_group[group_name] = (requests, pad_size)
 
         all_requests = [request for requests, _ in requests_by_group.values() for request in requests]
-        all_outputs = await _gather_results(all_requests)
+        all_outputs = await asyncio.gather(*all_requests)
         group_outputs = {}
         offset = 0
         for group_name, (requests, pad_size) in requests_by_group.items():
@@ -364,11 +352,3 @@ class OmniRewardLoopManager(RewardLoopManager):
             await asyncio.gather(*[getattr(replica, method)(**kwargs) for replica in replicas])
 
         asyncio.run(run_all())
-
-
-async def _resolve_result(result):
-    return await result if inspect.isawaitable(result) else result
-
-
-async def _gather_results(results):
-    return await asyncio.gather(*(_resolve_result(result) for result in results))
