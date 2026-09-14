@@ -2,11 +2,9 @@
 
 Last updated: 09/14/2026
 
-> **Scope:** This is the `verl-omni` extension guide for named model-backed
-> rewards configured under `reward.models`. The upstream `verl` Reward Loop
-> guide describes the legacy single-model path based on
-> `reward.reward_model` and `reward.custom_reward_function`; its model-backed
-> setup is not the integration contract for new named reward models.
+This guide describes how to configure and extend named model-backed rewards
+under `reward.models` in `verl-omni`. For the general Reward Loop interface and
+custom reward functions, refer to the upstream `verl` documentation.
 
 `reward.models` lets one training job use one or more independently managed
 model-backed rewards. It supports an engine backend, a native backend, or both
@@ -42,13 +40,14 @@ Audio and other modality-specific multi-reward managers are follow-up work.
 The engine path documented here uses vLLM. vLLM-Omni reward serving is not
 implemented; vLLM-Omni can still be used independently for actor rollout.
 
-Existing jobs without `reward.models` continue to use the legacy reward path.
-Do not set `reward.reward_model.enable=true` together with `reward.models`.
+Existing jobs without `reward.models` continue to use the existing single-model
+reward path. Do not set `reward.reward_model.enable=true` together with
+`reward.models`.
 
-## Migrate a legacy engine reward
+## Migrate an existing engine reward
 
-A legacy engine configuration has one global reward model and one custom reward
-function:
+An existing single-model engine configuration has one global reward model and
+one custom reward function:
 
 ```yaml
 reward:
@@ -67,9 +66,9 @@ reward:
     name: compute_score
 ```
 
-To migrate it, disable the legacy model, create a named `engine` model, and move
-the scoring function into `reward.reward_functions`. The model name and reward
-term name can be the same:
+To migrate it, disable the existing single model, create a named `engine` model,
+and move the scoring function into `reward.reward_functions`. The model name and
+reward term name can be the same:
 
 ```yaml
 reward:
@@ -121,7 +120,7 @@ async def compute_score(
 
 `reward.reward_model.rollout` remains the common engine default. Values under a
 named model's `rollout` override those defaults. A named model's `model_path`
-also overrides the legacy common `reward_model.model_path` fallback.
+also overrides the common `reward_model.model_path` fallback.
 
 ## Model-to-reward binding
 
