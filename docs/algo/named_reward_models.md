@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 09/14/2026
+Last updated: 09/21/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -15,20 +15,24 @@ The framework deliberately separates inference from scoring:
 - a named model owns resources, inference access, and lifecycle;
 - a reward function converts one training sample into model inputs and converts
   the model output into a score;
-- `MultiVisualRewardManager` combines scores with a weighted sum.
+- `MultiRewardManager` projects available text, visual, and audio outputs and
+  combines scores with a weighted sum.
 
 PickScore is an example of this contract, not a special case in the framework.
 
-Named models currently use the visual sample contract. Select the manager
+Named models use the modality-neutral multi-reward contract. Select the manager
 explicitly; the framework does not rewrite a user-provided manager:
 
 ```yaml
 reward:
   reward_manager:
-    name: MultiVisualRewardManager
+    name: MultiRewardManager
 ```
 
-Audio and other modality-specific multi-reward managers are follow-up work.
+The manager supplies the compatible scorer arguments that are present for a
+sample: `solution_str`, `solution_image`, and/or `solution_audio`. Existing
+visual configurations may continue to use `MultiVisualRewardManager` while
+migrating.
 
 ## Backend selection
 
@@ -409,7 +413,7 @@ through `exp()` again.
 
 ## Current limitations
 
-- Named-model aggregation currently uses the visual reward manager contract.
+- `MultiVisualRewardManager` remains available as a backward-compatible visual-only wrapper.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
 - CPU-native placement is not supported.
 - Native routing uses a static even split rather than dynamic load balancing.
