@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Deprecated visual-only wrapper around the unified reward manager."""
+"""Backward-compatible visual-only wrapper around the unified reward manager."""
 
 from .adapter import validate_visual_response
 from .multi import MultiRewardManager
@@ -22,7 +22,7 @@ _validate_visual_response = validate_visual_response
 
 
 class VisualRewardManager(MultiRewardManager):
-    """Deprecated compatibility wrapper using only the visual reward adapter."""
+    """Backward-compatible wrapper using only the visual reward adapter."""
 
     _adapter_mode = "visual"
     _supports_named_reward_models = False

@@ -11,14 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Deprecated audio-only wrapper around the unified reward manager."""
+"""Backward-compatible audio-only wrapper around the unified reward manager."""
 
 from verl_omni.reward_loop.reward_manager.adapter import AudioRewardAdapter, RewardInputAdapter, extract_audio
 from verl_omni.reward_loop.reward_manager.multi import MultiRewardManager
 
 
 class AudioRewardManager(MultiRewardManager):
-    """Deprecated compatibility wrapper using only the audio reward adapter."""
+    """Backward-compatible wrapper using only the audio reward adapter."""
 
     _adapter_mode = "audio"
     _require_custom_reward_function = True

@@ -312,6 +312,6 @@ class MultiRewardManager(RewardManagerBase):
 
 
 class MultiVisualRewardManager(MultiRewardManager):
-    """Deprecated visual-only compatibility wrapper for :class:`MultiRewardManager`."""
+    """Backward-compatible visual-only wrapper for :class:`MultiRewardManager`."""
 
     _adapter_mode = "multi_visual"

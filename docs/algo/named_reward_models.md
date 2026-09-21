@@ -32,8 +32,9 @@ reward:
 The manager supplies the compatible scorer arguments that are present for a
 sample: `solution_str`, `solution_image`, and/or `solution_audio`. Repository
 configurations use `MultiRewardManager`. `VisualRewardManager`,
-`AudioRewardManager`, and `MultiVisualRewardManager` remain deprecated
-compatibility wrappers for external configurations.
+`AudioRewardManager`, and `MultiVisualRewardManager` remain compatibility
+wrappers for external configurations. They may be deprecated in a future
+release; new configurations should use `MultiRewardManager`.
 
 ## Backend selection
 
@@ -414,7 +415,8 @@ through `exp()` again.
 
 ## Current limitations
 
-- The old modality-specific manager names remain deprecated compatibility wrappers.
+- The old modality-specific manager names remain compatibility wrappers and may
+  be deprecated in a future release.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
 - CPU-native placement is not supported.
 - Native routing uses a static even split rather than dynamic load balancing.

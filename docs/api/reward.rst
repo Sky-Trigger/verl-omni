@@ -11,7 +11,9 @@ computation is dispatched per sample by reward managers. The modality-neutral
 reward terms and preserves their per-model outputs while computing the
 configured weighted aggregate. Text, visual, and audio input adapters project
 rollout outputs into scorer arguments without changing engine execution.
-Deprecated modality-specific manager names remain as compatibility wrappers.
+Legacy modality-specific manager names remain as compatibility wrappers and
+may be deprecated in a future release. New configurations should use only
+``MultiRewardManager``.
 The manager plugs into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` — verl's
 :class:`~verl.experimental.reward_loop.RewardLoopManager` extended with
 profiler control over the reward-model rollout servers.
