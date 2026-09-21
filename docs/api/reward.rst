@@ -9,10 +9,10 @@ vision-language model served behind an OpenAI-compatible router). Reward
 computation is dispatched per sample by reward managers. The modality-neutral
 :class:`~verl_omni.reward_loop.reward_manager.MultiRewardManager` runs named
 reward terms and preserves their per-model outputs while computing the
-configured weighted aggregate. Modality-specific managers include
-:class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager` and
-:class:`~verl_omni.reward_loop.reward_manager.AudioRewardManager`. They plug
-into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` — verl's
+configured weighted aggregate. Text, visual, and audio input adapters project
+rollout outputs into scorer arguments without changing engine execution.
+Deprecated modality-specific manager names remain as compatibility wrappers.
+The manager plugs into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` — verl's
 :class:`~verl.experimental.reward_loop.RewardLoopManager` extended with
 profiler control over the reward-model rollout servers.
 
@@ -21,8 +21,9 @@ profiler control over the reward-model rollout servers.
 
    verl_omni.reward_loop.reward_loop.OmniRewardLoopManager
    verl_omni.reward_loop.reward_manager.MultiRewardManager
-   verl_omni.reward_loop.reward_manager.VisualRewardManager
-   verl_omni.reward_loop.reward_manager.AudioRewardManager
+   verl_omni.reward_loop.reward_manager.TextRewardAdapter
+   verl_omni.reward_loop.reward_manager.VisualRewardAdapter
+   verl_omni.reward_loop.reward_manager.AudioRewardAdapter
    verl_omni.utils.reward_score.default_compute_score_image
    verl_omni.utils.reward_score.http_scorer_client.compute_score
    verl_omni.utils.reward_score.audio_http_scorer_client.compute_score
@@ -40,15 +41,17 @@ Reward Manager
 .. autoclass:: verl_omni.reward_loop.reward_manager.MultiRewardManager
    :members: __init__, run_single, assemble_rm_scores
 
-.. autoclass:: verl_omni.reward_loop.reward_manager.VisualRewardManager
-   :members: __init__, run_single
+Reward Input Adapters
+~~~~~~~~~~~~~~~~~~~~~
 
-.. autoclass:: verl_omni.reward_loop.reward_manager.AudioRewardManager
-   :members: __init__, run_single
+.. autoclass:: verl_omni.reward_loop.reward_manager.TextRewardAdapter
+   :members: matches, adapt
 
-``AudioRewardManager`` reads ``audio`` and ``audio_sample_rate`` from rollout
-``extra_info``, validates a finite CPU float waveform, and calls a synchronous
-or asynchronous custom scorer with ``solution_audio=(waveform, sample_rate)``.
+.. autoclass:: verl_omni.reward_loop.reward_manager.VisualRewardAdapter
+   :members: matches, adapt
+
+.. autoclass:: verl_omni.reward_loop.reward_manager.AudioRewardAdapter
+   :members: matches, adapt
 
 Default Score Dispatcher
 ~~~~~~~~~~~~~~~~~~~~~~~~~

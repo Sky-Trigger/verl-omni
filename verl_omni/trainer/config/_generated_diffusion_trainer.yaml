@@ -524,7 +524,7 @@ reward:
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig
     source: importlib
-    name: VisualRewardManager
+    name: MultiRewardManager
     module:
       _target_: verl.trainer.config.config.ModuleConfig
       path: pkg://verl_omni.reward_loop.reward_manager

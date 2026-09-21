@@ -258,7 +258,7 @@ def test_recipe_wraps_the_merged_generic_qwen3_tts_path(tmp_path):
     assert overrides["actor_rollout_ref.rollout.logprobs_mode"] == "processed_logprobs"
     assert overrides["algorithm.adv_estimator"] == "grpo"
     assert overrides["reward.custom_reward_function.path"].endswith("audio_http_scorer_client")
-    assert overrides["reward.reward_manager.name"] == "AudioRewardManager"
+    assert overrides["reward.reward_manager.name"] == "MultiRewardManager"
 
 
 def test_recipe_keeps_complete_step_20_validation_and_allows_smoke_overrides(tmp_path):

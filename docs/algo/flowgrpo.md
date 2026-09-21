@@ -1,6 +1,6 @@
 # Flow-GRPO
 
-Last updated: 07/22/2026.
+Last updated: 09/21/2026.
 
 Flow-GRPO ([paper](https://arxiv.org/abs/2505.05470), [code](https://github.com/yifan123/flow_grpo)) is the first method to integrate online policy gradient reinforcement learning into **flow matching** generative models (e.g., Stable Diffusion 3, FLUX). It enables direct reward optimization for tasks such as compositional text-to-image generation, visual text rendering, and human preference alignment, without modifying the standard inference pipeline.
 
@@ -228,7 +228,7 @@ bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ### Rule-Based Reward Training: JPEG incompressibility
 
 FlowGRPO also supports rule-based rewards that score images directly without a
-VLM reward model, reusing the default `VisualRewardManager` from
+VLM reward model, reusing the default `MultiRewardManager` from
 `verl_omni/trainer/config/reward/reward.yaml`.
 
 `verl_omni/utils/reward_score/jpeg_compressibility.py` rewards images that are

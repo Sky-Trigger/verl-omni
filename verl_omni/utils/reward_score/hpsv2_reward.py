@@ -166,7 +166,7 @@ def compute_score_hpsv2(
     ground_truth: Any = None,
     **_: Any,
 ) -> dict[str, float]:
-    """Score one generated image using the VisualRewardManager contract."""
+    """Score one generated image using the visual reward-adapter contract."""
     scorer = _get_hpsv2_scorer()
     prompt = "" if ground_truth is None else str(ground_truth)
     score = scorer.score(_to_rgb_image(solution_image), prompt)

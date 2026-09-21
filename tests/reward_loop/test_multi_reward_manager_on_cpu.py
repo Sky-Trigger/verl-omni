@@ -24,6 +24,7 @@ from omegaconf import OmegaConf
 from verl import DataProto
 from verl.trainer.ppo.reward import resolve_reward_manager_cls
 
+from verl_omni.reward_loop.reward_manager.adapter import AudioRewardAdapter, TextRewardAdapter, VisualRewardAdapter
 from verl_omni.reward_loop.reward_manager.multi import MultiRewardManager, MultiVisualRewardManager, _filter_kwargs
 from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager
 
@@ -273,7 +274,7 @@ class TestMultiRewardManagerRunSingle:
         )
         manager.compute_score = reward_asserts_float_latent_contract
         manager.is_async_reward_score = True
-        if isinstance(manager, MultiRewardManager):
+        if manager._sub_rewards:
             manager._sub_rewards[0]["fn"] = reward_asserts_float_latent_contract
             manager._sub_rewards[0]["is_async"] = True
 
@@ -494,6 +495,51 @@ class TestMultiRewardManagerRunSingle:
         assert result["reward_score"] == pytest.approx(0.7)
         assert result["reward_extra_info"]["reward/audio/modality"] == "audio"
 
+    def test_single_audio_reward_uses_generic_manager_adapter(self):
+        manager = MultiRewardManager(_make_config({}), MagicMock(), compute_score=reward_audio)
+        data = DataProto.from_dict(
+            tensors={"responses": torch.tensor([[1, 2]])},
+            non_tensors={
+                "data_source": ["audio"],
+                "reward_model": [{"ground_truth": "hello"}],
+                "extra_info": [{}],
+                "tool_extra_fields": [
+                    {
+                        "audio": np.arange(8, dtype=np.float32),
+                        "audio_sample_rate": 24_000,
+                        "media_kind": "audio",
+                    }
+                ],
+            },
+        )
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result == {"reward_score": pytest.approx(0.7), "reward_extra_info": {"modality": "audio"}}
+
+    def test_single_visual_reward_preserves_legacy_engine_router_contract(self):
+        async def score(reward_router_address, model_name, sampling_params, solution_image):
+            assert reward_router_address == "legacy-router"
+            assert model_name == "legacy-model"
+            assert sampling_params == {"max_tokens": 2048, "seed": 17}
+            assert solution_image.dtype == torch.uint8
+            return 0.6
+
+        config = _make_config({})
+        config.reward.reward_model.model_path = "legacy-model"
+        config.reward.reward_model.rollout.full_determinism = True
+        config.reward.reward_model.rollout.seed = 17
+        manager = MultiRewardManager(
+            config,
+            MagicMock(),
+            compute_score=score,
+            reward_router_address="legacy-router",
+        )
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.6)
+
     def test_declared_audio_without_waveform_fails_before_scoring(self):
         manager = _build_manager({"audio": {"path": DUMMY_REWARDS_PATH, "name": "reward_audio", "weight": 1.0}})
         data = DataProto.from_dict(
@@ -566,20 +612,32 @@ class TestMultiRewardManagerRunSingle:
         result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
 
         assert result["reward_score"] == pytest.approx(0.5)
-        assert isinstance(manager, VisualRewardManager)
+        assert not isinstance(manager, VisualRewardManager)
+        assert [type(adapter) for adapter in manager._reward_adapters] == [VisualRewardAdapter, AudioRewardAdapter]
         assert MultiVisualRewardManager.assemble_rm_scores(_make_single_data(), [0.5]).shape == (1, 1)
 
 
 class TestMultiRewardManagerInit:
-    def test_resolves_from_reward_manager_config(self):
+    def test_default_reward_manager_config_resolves_to_unified_manager(self):
         config = _make_config({"a": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0}})
-        config.reward.reward_manager.name = "MultiRewardManager"
 
         assert resolve_reward_manager_cls(config) is MultiRewardManager
 
-    def test_empty_reward_functions_raises(self):
-        with pytest.raises(ValueError, match="non-empty"):
-            _build_manager({})
+    def test_empty_reward_functions_uses_single_reward_compatibility_path(self):
+        manager = _build_manager({})
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data("jpeg_compressibility")))
+
+        assert result["reward_score"] != pytest.approx(0.0)
+
+    def test_generic_manager_uses_modality_adapters(self):
+        manager = _build_manager({"a": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score"}})
+
+        assert [type(adapter) for adapter in manager._reward_adapters] == [
+            TextRewardAdapter,
+            VisualRewardAdapter,
+            AudioRewardAdapter,
+        ]
 
     def test_loads_sub_rewards(self):
         reward_fns = {

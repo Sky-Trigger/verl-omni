@@ -76,7 +76,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --train_size "${synthetic_train_size}" \
     --val_size 4
 
-# Let VisualRewardManager dispatch the data source to the JPEG scorer.
+# Let MultiRewardManager dispatch the data source to the JPEG scorer.
 python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \

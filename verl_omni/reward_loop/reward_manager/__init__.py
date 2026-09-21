@@ -12,8 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .adapter import AudioRewardAdapter, RewardInputAdapter, TextRewardAdapter, VisualRewardAdapter
 from .audio import AudioRewardManager
 from .multi import MultiRewardManager, MultiVisualRewardManager
 from .visual import VisualRewardManager
 
-__all__ = ["AudioRewardManager", "MultiRewardManager", "MultiVisualRewardManager", "VisualRewardManager"]
+__all__ = [
+    "AudioRewardAdapter",
+    "AudioRewardManager",
+    "MultiRewardManager",
+    "MultiVisualRewardManager",
+    "RewardInputAdapter",
+    "TextRewardAdapter",
+    "VisualRewardAdapter",
+    "VisualRewardManager",
+]
