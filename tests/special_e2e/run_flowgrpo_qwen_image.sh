@@ -130,7 +130,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.rollout.response_length=32 \
     reward.custom_reward_function.path=pkg://verl_omni.reward_loop.reward_manager.multi \
     reward.custom_reward_function.name=_multi_reward_placeholder \
-    reward.reward_manager.name=MultiRewardManager \
+    reward.reward_manager.name=MultiVisualRewardManager \
     reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
     "+reward.reward_functions.jpeg.path=pkg://verl_omni.utils.reward_score.jpeg_compressibility" \
     '+reward.reward_functions.jpeg.name=compute_score' \
