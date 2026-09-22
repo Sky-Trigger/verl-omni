@@ -204,7 +204,7 @@ class MultiRewardManager(RewardManagerBase):
             "reward_model_tokenizer": self.reward_model_tokenizer,
             "model_name": self.config.reward.reward_model.model_path,
         }
-        if not self._sub_rewards and "solution_image" in reward_kwargs:
+        if "solution_image" in reward_kwargs:
             rm_rollout = self.config.reward.reward_model.rollout
             sampling_params = {"max_tokens": getattr(rm_rollout, "response_length", None) or 4096}
             if rm_rollout.get("full_determinism", False):
