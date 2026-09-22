@@ -89,7 +89,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     reward.reward_model.enable=False \
     reward.reward_model.enable_resource_pool=False \
-    reward.reward_manager.name=MultiRewardManager \
+    reward.reward_manager.name=MultiVisualRewardManager \
     +reward.models.engine_model.backend=engine \
     +reward.models.engine_model.offload=$REWARD_OFFLOAD \
     +reward.models.engine_model.model_path=$pickscore_model_path \

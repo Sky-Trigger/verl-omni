@@ -241,10 +241,11 @@ def test_native_only_model_uses_parent_pool_and_batch_scoring():
 
 
 def test_named_models_require_multi_reward_manager():
-    _validate_named_reward_manager_cls(MultiRewardManager)
     _validate_named_reward_manager_cls(MultiVisualRewardManager)
 
-    with pytest.raises(ValueError, match="requires.*MultiRewardManager"):
+    with pytest.raises(ValueError, match="requires a MultiRewardManager subclass"):
+        _validate_named_reward_manager_cls(MultiRewardManager)
+    with pytest.raises(ValueError, match="requires a MultiRewardManager subclass"):
         _validate_named_reward_manager_cls(VisualRewardManager)
 
 

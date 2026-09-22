@@ -15,31 +15,26 @@ The framework deliberately separates inference from scoring:
 - a named model owns resources, inference access, and lifecycle;
 - a reward function converts one training sample into model inputs and converts
   the model output into a score;
-- `MultiRewardManager` owns scorer dispatch and weighted aggregation;
-- text, visual, and audio adapters project and validate rollout outputs.
+- `MultiRewardManager` owns model-aware scorer dispatch, per-term outputs,
+  failure handling, and weighted aggregation without owning an input modality.
+- An input-specific subclass prepares scorer arguments. The current named-model
+  recipes use the visual contract supplied by `MultiVisualRewardManager`.
 
 PickScore is an example of this contract, not a special case in the framework.
 
-Named models use the modality-neutral multi-reward contract. Select the manager
-explicitly; the framework does not rewrite a user-provided manager:
+Named models require a `MultiRewardManager` subclass with an input contract.
+Current maintained recipes use the visual subclass explicitly; the framework
+does not rewrite a user-provided manager:
 
 ```yaml
 reward:
   reward_manager:
-    name: MultiRewardManager
+    name: MultiVisualRewardManager
 ```
 
-The manager supplies the compatible scorer arguments that are present for a
-sample: `solution_str`, `solution_image`, and/or `solution_audio`. Repository
-configurations use `MultiRewardManager`. `VisualRewardManager`,
-`AudioRewardManager`, and `MultiVisualRewardManager` remain compatibility
-wrappers for external configurations. They may be deprecated in a future
-release; new configurations should use `MultiRewardManager`.
-
-The primary rollout modality is always adapted. A scorer that consumes an
-auxiliary modality must name that argument explicitly in its signature; for
-example, an audiovisual scorer should declare both `solution_image` and
-`solution_audio`. A catch-all `**kwargs` does not opt in to auxiliary media.
+Consolidating audio, text, and other input contracts behind the shared manager
+is separate follow-up work. Until then, modality-specific managers and their
+existing recipes remain unchanged.
 
 ## Backend selection
 
@@ -420,8 +415,8 @@ through `exp()` again.
 
 ## Current limitations
 
-- The old modality-specific manager names remain compatibility wrappers and may
-  be deprecated in a future release.
+- Named-model aggregation currently uses the visual input contract implemented
+  by `MultiVisualRewardManager`; the aggregation core itself is modality-neutral.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
 - CPU-native placement is not supported.
 - Native routing uses a static even split rather than dynamic load balancing.

@@ -47,11 +47,9 @@ logger = logging.getLogger(__name__)
 def _validate_named_reward_manager_cls(reward_manager_cls) -> None:
     from .reward_manager.multi import MultiRewardManager
 
-    if not issubclass(reward_manager_cls, MultiRewardManager) or not getattr(
-        reward_manager_cls, "_supports_named_reward_models", False
-    ):
+    if reward_manager_cls is MultiRewardManager or not issubclass(reward_manager_cls, MultiRewardManager):
         raise ValueError(
-            "reward.models requires reward.reward_manager.name=MultiRewardManager; "
+            "reward.models requires a MultiRewardManager subclass with an input contract; "
             f"got {reward_manager_cls.__name__!r}."
         )
 
