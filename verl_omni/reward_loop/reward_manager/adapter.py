@@ -60,9 +60,16 @@ def build_common_reward_kwargs(data_item: DataProto) -> tuple[dict[str, Any], di
 class RewardInputAdapter:
     """Hook that projects one rollout modality into scorer keyword arguments."""
 
+    provided_keys: frozenset[str] = frozenset()
+    required = False
+
     def matches(self, data_item: DataProto, extra_info: dict[str, Any]) -> bool:
         """Return whether this adapter applies to the sample."""
         raise NotImplementedError
+
+    def is_primary(self, data_item: DataProto, extra_info: dict[str, Any]) -> bool:
+        """Return whether this adapter owns the sample's primary modality."""
+        return self.matches(data_item, extra_info)
 
     async def adapt(
         self,
@@ -76,6 +83,8 @@ class RewardInputAdapter:
 
 class TextRewardAdapter(RewardInputAdapter):
     """Decode token responses for text reward functions."""
+
+    provided_keys = frozenset({"solution_str"})
 
     def matches(self, data_item: DataProto, extra_info: dict[str, Any]) -> bool:
         response = data_item.batch["responses"]
@@ -115,6 +124,8 @@ def validate_visual_response(response_visual: Any, config: Any, *, is_validate: 
 
 class VisualRewardAdapter(RewardInputAdapter):
     """Project and validate image, video, and visual-latent responses."""
+
+    provided_keys = frozenset({"solution_image"})
 
     def __init__(self, *, required: bool = False):
         self.required = required
@@ -180,6 +191,8 @@ def extract_audio(extra_info: dict[str, Any]) -> tuple[np.ndarray, int]:
 class AudioRewardAdapter(RewardInputAdapter):
     """Project and validate a generated audio waveform."""
 
+    provided_keys = frozenset({"solution_audio"})
+
     def __init__(
         self,
         *,
@@ -196,6 +209,10 @@ class AudioRewardAdapter(RewardInputAdapter):
             or "audio" in extra_info
             or "audio_sample_rate" in extra_info
         )
+
+    def is_primary(self, data_item: DataProto, extra_info: dict[str, Any]) -> bool:
+        """Treat audio as primary only for an audio rollout, not video side data."""
+        return extra_info.get("media_kind") == "audio"
 
     async def adapt(
         self,

@@ -55,6 +55,13 @@ Reward Input Adapters
 .. autoclass:: verl_omni.reward_loop.reward_manager.AudioRewardAdapter
    :members: matches, adapt
 
+The manager always runs the adapter for a sample's primary modality. An
+auxiliary modality is projected only when at least one configured scorer
+explicitly declares the corresponding argument, such as ``solution_audio``.
+Accepting ``**kwargs`` alone does not request every auxiliary modality. This
+keeps video rewards from validating or copying side-channel audio they do not
+consume while allowing audiovisual scorers to opt in explicitly.
+
 Default Score Dispatcher
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 

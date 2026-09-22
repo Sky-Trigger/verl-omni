@@ -170,6 +170,19 @@ class MultiRewardManager(RewardManagerBase):
                 "Check reward.reward_functions config."
             )
 
+    def _requested_adapter_keys(self) -> frozenset[str]:
+        """Return modality kwargs explicitly declared by active scorers."""
+        if self._sub_rewards:
+            signatures = [sub["sig"] for sub in self._sub_rewards]
+        elif not _is_default_reward_function(self.compute_score):
+            try:
+                signatures = [inspect.signature(self.compute_score)]
+            except (TypeError, ValueError):
+                signatures = []
+        else:
+            signatures = []
+        return frozenset(name for sig in signatures for name in sig.parameters)
+
     def set_reward_executors(
         self,
         engine_reward_executors: dict[str, Any] | None,
@@ -191,8 +204,14 @@ class MultiRewardManager(RewardManagerBase):
         """Project all applicable rollout modalities through adapter hooks."""
         reward_kwargs, extra_info = build_common_reward_kwargs(data_item)
         context = RewardAdapterContext(config=self.config, tokenizer=self.tokenizer, loop=self.loop)
+        requested_keys = self._requested_adapter_keys()
         for adapter in self._reward_adapters:
-            if adapter.matches(data_item, extra_info):
+            should_adapt = (
+                adapter.required
+                or adapter.is_primary(data_item, extra_info)
+                or not adapter.provided_keys.isdisjoint(requested_keys)
+            )
+            if should_adapt and adapter.matches(data_item, extra_info):
                 reward_kwargs.update(await adapter.adapt(data_item, extra_info, context))
         return reward_kwargs
 

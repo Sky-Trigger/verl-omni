@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 09/21/2026
+Last updated: 09/22/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -35,6 +35,11 @@ configurations use `MultiRewardManager`. `VisualRewardManager`,
 `AudioRewardManager`, and `MultiVisualRewardManager` remain compatibility
 wrappers for external configurations. They may be deprecated in a future
 release; new configurations should use `MultiRewardManager`.
+
+The primary rollout modality is always adapted. A scorer that consumes an
+auxiliary modality must name that argument explicitly in its signature; for
+example, an audiovisual scorer should declare both `solution_image` and
+`solution_audio`. A catch-all `**kwargs` does not opt in to auxiliary media.
 
 ## Backend selection
 

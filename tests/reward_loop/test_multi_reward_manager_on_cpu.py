@@ -93,6 +93,12 @@ def reward_visual_with_aux_audio(solution_image, solution_audio):
     return 0.9
 
 
+def reward_visual_with_kwargs(solution_image, **kwargs):
+    assert solution_image.dtype == torch.uint8
+    assert "solution_audio" not in kwargs
+    return 0.6
+
+
 async def reward_uses_named_engine_router(reward_router_address, model_name):
     assert reward_router_address == "engine-router"
     assert model_name == "ocr-model"
@@ -588,6 +594,50 @@ class TestMultiRewardManagerRunSingle:
         result = manager.loop.run_until_complete(manager.run_single(data))
 
         assert result["reward_score"] == pytest.approx(0.9)
+
+    def test_visual_reward_skips_unrequested_stereo_auxiliary_audio(self):
+        manager = _build_manager(
+            {
+                "visual": {
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_visual_with_kwargs",
+                    "weight": 1.0,
+                }
+            }
+        )
+        data = _make_single_data()
+        data.non_tensor_batch["tool_extra_fields"] = np.array(
+            [
+                {
+                    "audio": np.zeros((2, 142_400), dtype=np.float32),
+                    "audio_sample_rate": 44_100,
+                    "media_kind": "video",
+                }
+            ],
+            dtype=object,
+        )
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] == pytest.approx(0.6)
+
+    def test_single_visual_reward_skips_unrequested_stereo_auxiliary_audio(self):
+        manager = MultiRewardManager(_make_config({}), MagicMock(), compute_score=reward_visual_with_kwargs)
+        data = _make_single_data()
+        data.non_tensor_batch["tool_extra_fields"] = np.array(
+            [
+                {
+                    "audio": np.zeros((2, 142_400), dtype=np.float32),
+                    "audio_sample_rate": 44_100,
+                    "media_kind": "video",
+                }
+            ],
+            dtype=object,
+        )
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] == pytest.approx(0.6)
 
     def test_assemble_rm_scores_preserves_modality_layouts(self):
         visual = DataProto.from_dict(tensors={"responses": torch.zeros(2, 3, 8, 8, dtype=torch.uint8)})
