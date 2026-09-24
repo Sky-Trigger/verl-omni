@@ -432,16 +432,6 @@ class TestMultiRewardManagerRunSingle:
 
         assert result["reward_score"] == pytest.approx(128)
 
-    def test_legacy_visual_manager_remains_compatible(self):
-        config = _make_config({"visual": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0}})
-        manager = MultiVisualRewardManager(config, MagicMock(), compute_score=None)
-
-        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
-
-        assert result["reward_score"] == pytest.approx(0.5)
-        assert isinstance(manager, VisualRewardManager)
-        assert MultiVisualRewardManager.assemble_rm_scores(_make_single_data(), [0.5]).shape == (1, 1)
-
     def test_legacy_visual_router_preserves_sampling_params(self):
         config = _make_config(
             {"legacy": {"path": DUMMY_REWARDS_PATH, "name": "reward_uses_legacy_router", "weight": 1.0}}

@@ -25,7 +25,7 @@ from verl.utils.import_utils import load_extern_object
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
 from .media import _reward_extra_info
-from .visual import VisualRewardManager, _validate_visual_response
+from .visual import _validate_visual_response
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +214,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
         return await self._run_multi_reward(await self._build_reward_kwargs(data[0]))
 
 
-class MultiVisualRewardManager(MultiRewardManager, VisualRewardManager):
+class MultiVisualRewardManager(MultiRewardManager):
     """Visual input contract backed by the shared multi-reward aggregator."""
 
     @classmethod
