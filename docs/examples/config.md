@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 09/17/2026
+Last updated: 09/25/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -75,8 +75,9 @@ algorithm:
 
 ### `actor_rollout_ref.separate` — synchronous resource separation
 
-`actor_rollout_ref.separate` defaults to `false`. When enabled, the legacy synchronous
-diffusion trainer (`trainer.use_v1=false`) places pure Actor workers on the trainer
+`actor_rollout_ref.separate` defaults to `false`. When enabled, the deprecated
+legacy synchronous diffusion trainer (`trainer.use_v1=false`) places pure Actor
+workers on the trainer
 resources and launches rollout/checkpoint workers on a separate Ray resource pool.
 The mode is limited to online policy-gradient training and publishes actor weights once
 before training and once after every logical-batch update.
@@ -110,9 +111,9 @@ standalone rollout GPUs from the Ray cluster.
 `actor_rollout_ref.rollout.agent.num_workers` controls CPU request concurrency; it
 does not allocate rollout GPUs and does not need to match `rollout.n_gpus_per_node`.
 
-This topology is v0-only (`trainer.use_v1=false`). The default CUDA DanceGRPO
-recipe is now the V1 sync launcher (`run_wan22_5b_t2v_hpsv3_v1.sh`); use the
-**deprecated** v0 auto-detect script below when you need
+This topology is v0-only (`trainer.use_v1=false`, deprecated). The default CUDA
+DanceGRPO recipe is now the V1 sync launcher (`run_wan22_5b_t2v_hpsv3_v1.sh`);
+use the **deprecated** v0 auto-detect script below when you need
 `actor_rollout_ref.separate`.
 
 On a CUDA Ray cluster, that v0 recipe forwards trailing Hydra overrides, so the
@@ -235,7 +236,7 @@ actor_rollout_ref:
 
 Shared PPO / FSDP / optim fields (`ppo_mini_batch_size`, `ppo_epochs`, `optim.lr`, `fsdp_config`, …) follow upstream verl — see the [verl Config Explanation](https://verl.readthedocs.io/en/latest/examples/config.html).
 
-VeOmni engine path (`strategy=veomni`) adds `veomni_config` / VeOmni optimizer fields; see {doc}`../start/install` and the `run_*_veomni.sh` recipes.
+VeOmni engine path (`strategy=veomni`) adds `veomni_config` / VeOmni optimizer fields; see {doc}`../start/engine_backends` and the `run_*_veomni.sh` recipes.
 
 ### `actor_rollout_ref.rollout` — `DiffusionRolloutConfig`
 
@@ -244,9 +245,9 @@ Diffusion-specific blocks sit under `pipeline`, `algo`, and `val_kwargs`. Severa
 #### Text-encoder tensor parallelism
 
 `actor_rollout_ref.rollout.text_encoder_tp_size` (default `1`) controls encoder
-sharding for supporting diffusion pipelines. Use `1` or exactly
-`actor_rollout_ref.rollout.tensor_model_parallel_size`; intermediate subgroups
-are rejected for the pinned backend.
+sharding for supporting diffusion pipelines. Use `1` or the full DiT group
+size (`tensor_model_parallel_size * ulysses_degree * ring_degree`);
+intermediate subgroups are rejected for the pinned backend.
 
 ```bash
 actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
@@ -255,13 +256,68 @@ actor_rollout_ref.rollout.text_encoder_tp_size=4
 
 NFT and FlowGRPO share this path. The field reaches the fused engine's
 `OmniDiffusionConfig.parallel_config.text_encoder_tp_size`; it is independent
-of CPU/layerwise offload. H3 launchers default `TEXT_ENCODER_TP` to `ROLLOUT_TP`.
+of CPU/layerwise offload. H3 launchers default `TEXT_ENCODER_TP` to `ROLLOUT_TP`
+when sequence parallelism is disabled.
 
 The legacy `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size`
 override is still accepted and overrides the typed default of `1`. Conflicting
 non-default typed and legacy values raise an error. If an explicit
 `parallel_config` provides ETP, it must agree with any requested override;
 otherwise its value is preserved. Prefer the typed field without `+`.
+
+#### Rollout sequence and VAE parallelism
+
+These are engine-startup fields under `actor_rollout_ref.rollout`, not per-request
+`pipeline` fields. Both NFT and FlowGRPO use the same configuration path.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `ulysses_degree` | `1` | Ulysses SP degree (`--usp` in vLLM-Omni) |
+| `ring_degree` | `1` | Ring SP degree |
+| `vae_patch_parallel_size` | `1` | VAE patch/tile ranks, reused from the DiT group |
+| `vae_parallel_mode` | `tile` | VAE parallel decode mode |
+| `vae_use_tiling` | `false` | Request tiled VAE execution |
+
+A replica occupies `TP * Ulysses * Ring` GPUs with `DP=PP=1`. Encoder TP and
+VAE parallelism reuse those ranks; they do not multiply GPU allocation again.
+Resource-bearing degrees must be set through these typed fields, not conflicting
+`engine_kwargs` or nested `parallel_config` overrides.
+
+The V0/V1 diffusion trainers use a local `LLMServerManager` subclass for SP-aware
+allocation, with matching vLLM-Omni replica, server-adapter and profiler rank
+mapping. No verl patch or TP-field substitution is needed. SP=1 delegates to the
+upstream path; SP>1 is limited to vLLM-Omni diffusion with DP=PP=1 and no
+prefill/decode disaggregation. GPU validation of the new SP/VAE path is still
+pending; CPU resource/routing checks are not performance evidence.
+
+vLLM-Omni's custom-pipeline loader skips its post-construction VAE/SP setup, so
+every registered rollout pipeline applies it after construction. Ulysses/Ring
+requires every declared DiT to define `_sp_plan`, and VAE parallelism requires a
+distributed VAE; unsupported combinations fail at startup instead of being
+ignored. At the pinned vLLM-Omni, Qwen-Image, Wan2.2, LTX-2 and MiniMax-H3 support
+both, Qwen-Image-Edit-Plus supports SP only, SD3 and Bagel support VAE parallelism
+only, and FLUX and Boogu-Image support neither.
+
+For MiniMax-H3, `vae_parallel_mode` must be `tile`, VAE parallel size must be `1`
+or the complete DiT group, CFG parallelism must be `1`, and hybrid Ulysses x Ring
+is rejected. Encoder TP must also divide 8. The native VAE may decode locally
+when there are fewer spatial tiles than ranks, so actual tile assignments must
+be checked when measuring speedup.
+
+Example using an existing four-GPU TP group:
+
+```bash
+actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+actor_rollout_ref.rollout.text_encoder_tp_size=4 \
+actor_rollout_ref.rollout.vae_patch_parallel_size=4 \
+actor_rollout_ref.rollout.vae_parallel_mode=tile \
+actor_rollout_ref.rollout.vae_use_tiling=true
+```
+
+Pure Ulysses on four GPUs uses
+`tensor_model_parallel_size=1`, `ulysses_degree=4`, `ring_degree=1`, and encoder
+and VAE parallel sizes of `4`. Do not set both TP and Ulysses to `4` on four GPUs:
+that requests sixteen ranks.
 
 #### Pipeline — `DiffusionPipelineConfig`
 
@@ -352,8 +408,9 @@ These sit on the diffusion trainer YAML (in addition to shared verl trainer fiel
 - `trainer.video_fps`: FPS for videos written to `rollout_data_dir` / `validation_data_dir` and logged to W&B (image runs ignore this).
 - `trainer.rollout_data_save_freq`: Dump train rollout every N steps (`1` = every step, `<= 0` = never).
 - `trainer.rollout_data_max_samples` / `validation_data_max_samples`: Cap samples dumped per train / val run (`null` = all).
-- `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). When `false`,
-  the legacy v0 diffusion trainer. Wan2.2 DanceGRPO on CUDA now defaults to V1
+- `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). Defaults
+  to `true` since v0.3.0; `false` explicitly selects the **deprecated** legacy
+  v0 diffusion trainer for every model. Wan2.2 DanceGRPO on CUDA defaults to V1
   via `run_wan22_5b_t2v_hpsv3_v1.sh`; the v0 auto-detect launcher is deprecated
   for CUDA.
 - `trainer.v1.*`: V1 mode / sampler / async placeholders (`trainer_mode`, `max_off_policy_threshold`, …). See {doc}`../start/diffusion_v1`.
