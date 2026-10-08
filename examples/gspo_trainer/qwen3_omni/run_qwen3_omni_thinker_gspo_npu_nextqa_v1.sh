@@ -151,8 +151,9 @@ exec python3 -m verl_omni.trainer.main_omni \
     algorithm.rollout_correction.bypass_mode=false \
     algorithm.rollout_correction.rollout_is=null \
     algorithm.rollout_correction.rollout_rs=null \
-    reward.reward_manager.source=register \
-    reward.reward_manager.name=naive \
+    reward.reward_manager.source=importlib \
+    reward.reward_manager.name=MultiRewardManager \
+    reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
     reward.custom_reward_function.path="${REPO_ROOT}/verl_omni/utils/reward_score/choice_reward.py" \
     reward.custom_reward_function.name=compute_score \
     trainer.device=npu \

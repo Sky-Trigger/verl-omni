@@ -98,7 +98,7 @@ The most important settings live under `reward`:
 | `reward.num_workers` | Number of reward-loop workers. Usually set to `NUM_GPUS_REWARD / REWARD_TP`. |
 | `reward.reward_model.rollout.tensor_model_parallel_size` | Tensor-parallel size for reward-model inference. Increase this when the reward model does not fit on one GPU. |
 | `reward.custom_reward_function.path` / `name` | Reward function used by the reward manager. It may be a normal function or an `async def` coroutine. |
-| `reward.reward_manager.name` / `module.path` | Optional reward manager override, for example `MultiVisualRewardManager` when combining multiple rewards. |
+| `reward.reward_manager.name` / `module.path` | Optional reward manager override; verl-omni defaults to the modality-neutral `MultiRewardManager`. |
 
 The base reward config documents these fields in
 `verl_omni/trainer/config/reward/reward.yaml`.

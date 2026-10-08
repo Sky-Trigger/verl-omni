@@ -26,7 +26,9 @@ def test_avqa_npu_launcher_wires_v1_multimodal_training():
         "actor_rollout_ref.actor.strategy=fsdp2",
         "actor_rollout_ref.rollout.name=vllm_omni",
         "engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe",
-        "reward.reward_manager.source=register",
+        "reward.reward_manager.source=importlib",
+        "reward.reward_manager.name=MultiRewardManager",
+        "reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager",
         "reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py",
     )
     assert all(setting in avqa_launcher for setting in required_settings)

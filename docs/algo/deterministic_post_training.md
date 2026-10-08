@@ -111,7 +111,7 @@ The reward router (verl's `NaiveRouter`) is least-loaded; under `VERL_FULL_DETER
 
 ### 4. Per-request sampling seed
 
-`VisualRewardManager` injects `seed = reward_model.rollout.seed` into each GRM request's `sampling_params`. vLLM's OpenAI-compatible endpoint honors the `seed` field, so the same image + same sampling params + same seed yields the same transcription, and therefore the same reward score. This is **controlled pseudorandom** sampling, not greedy — `temperature`/`top_k`/`top_p` are respected, and the seed makes the randomness reproducible.
+`MultiRewardManager` injects `seed = reward_model.rollout.seed` into each GRM request's `sampling_params`. vLLM's OpenAI-compatible endpoint honors the `seed` field, so the same image + same sampling params + same seed yields the same transcription, and therefore the same reward score. This is **controlled pseudorandom** sampling, not greedy — `temperature`/`top_k`/`top_p` are respected, and the seed makes the randomness reproducible.
 
 `do_sample` is **not** a valid vLLM `SamplingParams` key (silently ignored), so it is not passed. `max_tokens` is always supplied (default `4096`) so generation length is stable.
 

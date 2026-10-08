@@ -107,8 +107,9 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.ref.fsdp_config.model_dtype=bfloat16 \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
-    reward.reward_manager.source=register \
-    reward.reward_manager.name=naive \
+    reward.reward_manager.source=importlib \
+    reward.reward_manager.name=MultiRewardManager \
+    reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
     trainer.v1.trainer_mode=omni_separate_async \
     trainer.v1.separate_async.num_warmup_batches=1 \
     trainer.v1.separate_async.parameter_sync_step=1 \

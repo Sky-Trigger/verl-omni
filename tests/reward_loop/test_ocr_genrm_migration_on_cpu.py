@@ -60,7 +60,7 @@ def test_sd35_v1_ocr_recipe_composes_named_engine_model(tmp_path, executor_overr
     assert model.resolved_offload is False
     assert model.rollout["tensor_model_parallel_size"] == 1
     assert config.reward.reward_model.enable is False
-    assert config.reward.reward_manager.name == "MultiVisualRewardManager"
+    assert config.reward.reward_manager.name == "MultiRewardManager"
     assert config.reward.reward_functions.ocr.name == "compute_score_ocr"
     assert config.reward.reward_functions.ocr.required is True
     assert config.reward.reward_functions.ocr.use_rollout_sampling_params is True

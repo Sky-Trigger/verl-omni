@@ -6,13 +6,14 @@ Last updated: |today| (API docstrings are auto-generated).
 VeRL-Omni reward pipelines support both rule-based scoring (e.g. JPEG
 compressibility) and model-based generative reward models (e.g. OCR via a
 vision-language model served behind an OpenAI-compatible router). Reward
-computation is dispatched per sample by reward managers. The input-agnostic
-:class:`~verl_omni.reward_loop.reward_manager.MultiRewardManager` provides the
-shared named-term dispatch, per-term outputs, failure handling, and weighted
-aggregation used by input-specific subclasses. Modality-specific managers include
-:class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager` and
-:class:`~verl_omni.reward_loop.reward_manager.AudioRewardManager`. They plug
-into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` — verl's
+computation is dispatched per sample by reward managers. The modality-neutral
+:class:`~verl_omni.reward_loop.reward_manager.MultiRewardManager` runs one or
+many reward terms and preserves their per-model outputs while computing the
+configured weighted aggregate. Text, visual, and audio adapters project rollout
+outputs into scorer arguments without changing engine execution. Legacy
+modality-specific manager names remain as deprecated compatibility wrappers;
+new configurations should use ``MultiRewardManager``. The manager plugs into
+:class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` — verl's
 :class:`~verl.experimental.reward_loop.RewardLoopManager` extended with
 profiler control over the reward-model rollout servers.
 
@@ -21,8 +22,9 @@ profiler control over the reward-model rollout servers.
 
    verl_omni.reward_loop.reward_loop.OmniRewardLoopManager
    verl_omni.reward_loop.reward_manager.MultiRewardManager
-   verl_omni.reward_loop.reward_manager.VisualRewardManager
-   verl_omni.reward_loop.reward_manager.AudioRewardManager
+   verl_omni.reward_loop.reward_manager.TextRewardAdapter
+   verl_omni.reward_loop.reward_manager.VisualRewardAdapter
+   verl_omni.reward_loop.reward_manager.AudioRewardAdapter
    verl_omni.utils.reward_score.default_compute_score_image
    verl_omni.utils.reward_score.http_scorer_client.compute_score
    verl_omni.utils.reward_score.audio_http_scorer_client.compute_score
@@ -38,17 +40,28 @@ Reward Manager
 ~~~~~~~~~~~~~~~~~
 
 .. autoclass:: verl_omni.reward_loop.reward_manager.MultiRewardManager
-   :members: __init__, run_single
+   :members: __init__, run_single, assemble_rm_scores
 
-.. autoclass:: verl_omni.reward_loop.reward_manager.VisualRewardManager
-   :members: __init__, run_single
+Reward Input Adapters
+~~~~~~~~~~~~~~~~~~~~~
 
-.. autoclass:: verl_omni.reward_loop.reward_manager.AudioRewardManager
-   :members: __init__, run_single
+.. autoclass:: verl_omni.reward_loop.reward_manager.TextRewardAdapter
+   :members: matches, adapt
 
-``AudioRewardManager`` reads ``audio`` and ``audio_sample_rate`` from rollout
-``extra_info``, validates a finite CPU float waveform, and calls a synchronous
-or asynchronous custom scorer with ``solution_audio=(waveform, sample_rate)``.
+.. autoclass:: verl_omni.reward_loop.reward_manager.VisualRewardAdapter
+   :members: matches, adapt
+
+.. autoclass:: verl_omni.reward_loop.reward_manager.AudioRewardAdapter
+   :members: matches, adapt
+
+The manager always runs the adapter for a sample's primary modality. An
+auxiliary modality is projected only when a configured scorer explicitly
+declares its argument, such as ``solution_audio``.
+
+The text adapter accepts the same scorer arguments used by verl's ``naive`` and
+``rate_limited`` managers, including synchronous or asynchronous custom reward
+functions. Rate-limit enforcement remains an orthogonal execution policy; the
+input adapter does not duplicate semaphore, RPM, or TPM scheduling.
 
 Default Score Dispatcher
 ~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -97,7 +97,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     reward.reward_model.enable_resource_pool=True \
     reward.reward_model.nnodes=1 \
     reward.reward_model.n_gpus_per_node=$NUM_GPUS_REWARD \
-    reward.reward_manager.name=MultiVisualRewardManager \
+    reward.reward_manager.name=MultiRewardManager \
     +reward.models.ocr.backend=engine \
     +reward.models.ocr.offload=False \
     +reward.models.ocr.model_path=$reward_model_name \

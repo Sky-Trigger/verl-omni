@@ -21,7 +21,7 @@ import torch
 from omegaconf import OmegaConf
 from verl import DataProto
 
-from verl_omni.reward_loop.reward_manager import multi
+from verl_omni.reward_loop.reward_manager import MultiRewardManager, multi
 from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager
 from verl_omni.trainer.diffusion.v1 import tq_utils
 
@@ -64,7 +64,7 @@ def _data(monkeypatch, transport):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("manager_cls", [VisualRewardManager, multi.MultiVisualRewardManager])
+@pytest.mark.parametrize("manager_cls", [VisualRewardManager, multi.MultiVisualRewardManager, MultiRewardManager])
 @pytest.mark.parametrize("transport", ["tool", "top", "tq", "both"])
 async def test_generated_media_reaches_scorer(monkeypatch, manager_cls, transport):
     data, audio = _data(monkeypatch, transport)
@@ -84,7 +84,7 @@ async def test_generated_media_reaches_scorer(monkeypatch, manager_cls, transpor
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("manager_cls", [VisualRewardManager, multi.MultiVisualRewardManager])
+@pytest.mark.parametrize("manager_cls", [VisualRewardManager, multi.MultiVisualRewardManager, MultiRewardManager])
 @pytest.mark.parametrize(
     "field, value", [("media_kind", "image"), ("audio_sample_rate", 24000), ("audio", torch.zeros(1, 16))]
 )

@@ -28,7 +28,7 @@ DAPO_WITHOUT_DYNAMIC_SAMPLING_SETTINGS = (
     "algorithm.adv_estimator=grpo",
     "algorithm.use_kl_in_reward=false",
     "algorithm.filter_groups.enable=false",
-    "reward.reward_manager.source=register",
+    "reward.reward_manager.source=importlib",
     '+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe"',
 )
 
@@ -62,7 +62,8 @@ def test_dapo_example_launcher_has_phase_one_contract():
         "data.seed=42",
         "data.val_max_samples=-1",
         "data.validation_shuffle=false",
-        "reward.reward_manager.name=naive",
+        "reward.reward_manager.name=MultiRewardManager",
+        "reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager",
         "reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py",
         "reward.custom_reward_function.name=compute_score",
         "trainer.val_before_train=true",

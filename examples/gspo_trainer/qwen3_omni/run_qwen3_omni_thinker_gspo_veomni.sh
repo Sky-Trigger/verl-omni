@@ -88,8 +88,9 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.val_kwargs.do_sample=false \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=false \
-    reward.reward_manager.source=register \
-    reward.reward_manager.name=naive \
+    reward.reward_manager.source=importlib \
+    reward.reward_manager.name=MultiRewardManager \
+    reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
     reward.custom_reward_function.path="${REWARD_FUNCTION_PATH}" \
     reward.custom_reward_function.name=compute_score \
     trainer.n_gpus_per_node="${NUM_GPUS}" \

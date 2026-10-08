@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/06/2026
+Last updated: 10/09/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -16,25 +16,29 @@ The framework deliberately separates inference from scoring:
 - a reward function converts one training sample into model inputs and converts
   the model output into a score;
 - `MultiRewardManager` owns model-aware scorer dispatch, per-term outputs,
-  failure handling, and weighted aggregation without owning an input modality.
-- An input-specific subclass prepares scorer arguments. The current named-model
-  recipes use the visual contract supplied by `MultiVisualRewardManager`.
+  failure handling, and weighted aggregation;
+- text, visual, and audio adapters project and validate rollout outputs.
 
 PickScore is an example of this contract, not a special case in the framework.
 
-Named models require a `MultiRewardManager` subclass with an input contract.
-Current maintained recipes use the visual subclass explicitly; the framework
-does not rewrite a user-provided manager:
+Named models use the modality-neutral manager explicitly; the framework does
+not rewrite a user-provided manager:
 
 ```yaml
 reward:
   reward_manager:
-    name: MultiVisualRewardManager
+    name: MultiRewardManager
 ```
 
-Consolidating audio, text, and other input contracts behind the shared manager
-is separate follow-up work. Until then, modality-specific managers and their
-existing recipes remain unchanged.
+The manager supplies compatible scorer arguments present for a sample:
+`solution_str`, `solution_image`, and/or `solution_audio`. The deprecated
+`VisualRewardManager`, `AudioRewardManager`, and `MultiVisualRewardManager`
+names remain as compatibility wrappers; new configurations should use
+`MultiRewardManager`.
+
+The primary rollout modality is always adapted. A scorer consuming an
+auxiliary modality must name that argument explicitly in its signature. A
+catch-all `**kwargs` does not opt in to auxiliary media.
 
 ## Backend selection
 
@@ -132,7 +136,7 @@ also overrides the common `reward_model.model_path` fallback.
 
 The [SD3.5 V1 synchronous recipe](../../examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh)
 uses `reward.models.ocr` with the engine backend and
-`MultiVisualRewardManager`. It keeps the existing
+`MultiRewardManager`. It keeps the existing
 `Qwen/Qwen2.5-VL-3B-Instruct` checkpoint and `compute_score_ocr` scorer, with
 weight `1.0` and `required=true`.
 
@@ -448,14 +452,11 @@ through `exp()` again.
 
 ## Current limitations
 
-- Named-model aggregation currently uses the visual input contract implemented
-  by `MultiVisualRewardManager`; the aggregation core itself is modality-neutral.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
 - CPU-native placement is not supported.
 - Native routing uses a static even split rather than dynamic load balancing.
 - Named models do not participate in streaming reward computation.
 - vLLM-Omni reward serving is not implemented.
 
-Automatic migration of every existing reward implementation and a unified
-streaming/FSDP design remain follow-up work. The configuration migration and
-extension contracts supported by this change are documented above.
+A unified streaming/FSDP design remains follow-up work. The configuration
+migration and extension contracts supported by this change are documented above.

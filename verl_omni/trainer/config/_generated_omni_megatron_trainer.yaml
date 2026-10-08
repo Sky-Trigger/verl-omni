@@ -927,8 +927,8 @@ reward:
   aggregation: weighted_sum
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig
-    source: register
-    name: naive
+    source: importlib
+    name: MultiRewardManager
     module:
       _target_: verl.trainer.config.config.ModuleConfig
       path: pkg://verl_omni.reward_loop.reward_manager

@@ -139,11 +139,14 @@ reward:
   # Reward manager configuration.
   reward_manager:
 
-    # Resolve the built-in verl reward manager registry.
-    source: register
+    # Resolve the unified verl-omni reward manager.
+    source: importlib
 
-    # Use the standard text reward manager by default.
-    name: naive
+    # Route text-token rewards through the shared modality adapters.
+    name: MultiRewardManager
+
+    module:
+      path: pkg://verl_omni.reward_loop.reward_manager
 
 # Algorithm configuration.
 algorithm:
